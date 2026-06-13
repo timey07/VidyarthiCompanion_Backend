@@ -27,6 +27,7 @@ app.use('/api/v1/pocket', require('./modules/pocketBuddy/pocket.routes'));
 app.use('/api/v1/empathy', require('./modules/empathyMesh/empathy.routes'));
 app.use('/api/v1/community', require('./modules/communityEngine/community.routes'));
 app.use('/api/v1/transit', require('./modules/transitEngine/transit.routes'));
+app.use('/api/v1/retrieval', require('./modules/retrievalEngine/retrieval.routes'));
 
 // Start Server
 const PORT = process.env.PORT || 5000;
