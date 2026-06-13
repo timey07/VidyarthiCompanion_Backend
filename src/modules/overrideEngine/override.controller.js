@@ -1,5 +1,6 @@
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const bedrockService = require('./bedrock.service');
+const alertScheduler = require('../../core/alertScheduler');
 
 exports.verifyOverride = async (req, res) => {
   try {
@@ -25,6 +26,7 @@ exports.verifyOverride = async (req, res) => {
       status: 'verified',
       source: 'override_engine'
     });
+    alertScheduler.scheduleEventAlert(newEvent);
 
     // 3. Return the exact API Contract to User 1 (Frontend)
     res.status(200).json({
