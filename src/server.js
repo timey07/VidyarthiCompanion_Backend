@@ -23,6 +23,8 @@ app.get('/', (req, res) => {
 // e.g., app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
 // Mount Override Engine Routes
 app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
+app.use('/api/v1/pocket', require('./modules/pocketBuddy/pocket.routes'));
+app.use('/api/v1/empathy', require('./modules/empathyMesh/empathy.routes'));
 
 // Start Server
 const PORT = process.env.PORT || 5000;
