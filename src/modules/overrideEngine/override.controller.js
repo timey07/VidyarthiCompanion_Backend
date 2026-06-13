@@ -50,13 +50,22 @@ exports.verifyOverride = async (req, res) => {
       // Apply clean time units
       eventDate.setHours(hours, minutes, 0, 0);
 
-      // 3. Final Safety Check
+      // ==========================================
+      // 3. THE NEW YEAR HALLUCINATION CATCH
+      // ==========================================
+      const currentYear = new Date().getFullYear();
+      if (eventDate.getFullYear() < currentYear) {
+        console.log(`[Sanitizer] Correcting hallucinated year ${eventDate.getFullYear()} -> ${currentYear} for event: "${event.eventName}"`);
+        eventDate.setFullYear(currentYear);
+      }
+
+      // 4. Final Safety Check
       if (isNaN(eventDate.getTime())) {
         console.log(`[Warning] Skipping event "${event.eventName}" due to unparseable date values.`);
         continue;
       }
 
-      // 4. Database Save
+      // 5. Database Save
       const newEvent = await AcademicEvent.create({
         userId,
         eventName: event.eventName || "Untitled Event",
