@@ -1,8 +1,5 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
-
-// Initialize Gemini
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+require('dotenv').config();
 
 exports.askCampusFlow = async (req, res) => {
   try {
@@ -21,29 +18,44 @@ exports.askCampusFlow = async (req, res) => {
       : "No upcoming events found in the schedule.";
 
     // 2. Build the System Prompt
-    const prompt = `
-      You are CampusFlow, an intelligent and helpful college OS assistant. 
-      The student has asked: "${query}"
-      
-      Here is their actual upcoming schedule context from the database:
-      ${contextString}
+// 2. Build the System Prompt
+    const systemPrompt = `You are CampusFlow, an intelligent and helpful college OS assistant. 
+    The student has asked: "${query}"
+    
+    Here is their actual upcoming schedule context from the database (Note: These timestamps are in UTC):
+    ${contextString}
 
-      Answer the student's question directly, briefly, and conversationally based ONLY on the context provided. 
-      If the schedule is empty, gently tell them to upload a syllabus using the Override Engine.
-      Keep the response under 3 sentences.
-    `;
+    IMPORTANT TIMEZONE RULE: The user is in the India Standard Time (IST) timezone. You MUST convert all UTC times from the database context into IST (UTC +5:30) before presenting them to the user.
 
-    // 3. Call the fast Gemini Flash model
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const result = await model.generateContent(prompt);
-    const answer = result.response.text();
+    Answer the student's question directly, briefly, and conversationally based ONLY on the context provided. 
+    If the schedule is empty, gently tell them to upload a syllabus using the Override Engine.
+    Keep the response under 3 sentences.`;
+
+    // 3. Use the proven gemini-2.5-flash endpoint via native fetch
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: systemPrompt }]
+        }],
+        generationConfig: { temperature: 0.7 } // Slightly higher temp for conversational tone
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error?.message || "Gemini API Request Failed");
+    }
+
+    const answer = data.candidates[0].content.parts[0].text.trim();
 
     // 4. Send the AI response back to User 1
     res.status(200).json({
       success: true,
-      data: {
-        answer: answer.trim()
-      }
+      data: { answer }
     });
 
   } catch (error) {
