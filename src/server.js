@@ -2,16 +2,15 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const connectDB = require('./core/db');
+const AcademicEvent = require('./sharedModels/AcademicEvent.model');
+const alertScheduler = require('./core/alertScheduler');
 
 // Initialize App
 const app = express();
 
-// Connect to Database
-connectDB(); // TODO: Uncomment once you add MONGO_URI to your .env file
-
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // High limit for Base64 image payloads
+app.use(express.json({ limit: '10mb' })); 
 app.use(express.urlencoded({ extended: true }));
 
 // Health Check Route
@@ -19,18 +18,40 @@ app.get('/', (req, res) => {
   res.status(200).json({ status: 'CampusOS API is running normally.' });
 });
 
-// Module Routes will be mounted here later
-// e.g., app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
-// Mount Override Engine Routes
+// --- Mount All Routes Here ---
 app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
 app.use('/api/v1/pocket', require('./modules/pocketBuddy/pocket.routes'));
 app.use('/api/v1/empathy', require('./modules/empathyMesh/empathy.routes'));
 app.use('/api/v1/community', require('./modules/communityEngine/community.routes'));
-app.use('/api/v1/transit', require('./modules/transitEngine/transit.routes'));
 app.use('/api/v1/retrieval', require('./modules/retrievalEngine/retrieval.routes'));
+app.use('/api/v1/transit', require('./modules/transitEngine/transit.routes'));
+app.use('/api/v1/presence', require('./modules/presenceEngine/presence.routes')); // <-- New Presence Route
 
-// Start Server
+// --- Bootstrapper Function ---
+const bootstrapAlarms = async () => {
+  try {
+    const now = new Date();
+    // Find all events that have not happened yet
+    const upcomingEvents = await AcademicEvent.find({ date: { $gt: now } });
+    
+    console.log(`[Bootstrap] Found ${upcomingEvents.length} upcoming events. Rearming alarms...`);
+    upcomingEvents.forEach(event => {
+      alertScheduler.scheduleEventAlert(event);
+    });
+  } catch (error) {
+    console.error('[Bootstrap] Failed to rearm alarms:', error);
+  }
+};
+
+// Start Server and Connect DB
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+  
+  // 1. Connect to MongoDB first
+  await connectDB(); 
+  
+  // 2. Once DB is connected, fetch events and set alarms
+  await bootstrapAlarms(); 
 });
