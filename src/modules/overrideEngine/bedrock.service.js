@@ -1,4 +1,3 @@
-// src/modules/overrideEngine/bedrock.service.js
 require('dotenv').config();
 
 exports.processImageWithBedrock = async (base64String) => {
