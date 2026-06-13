@@ -1,18 +1,18 @@
-import dotenv from 'dotenv';
+const dotenv = require('dotenv');
 dotenv.config();
 
 /**
  * Extracts event details from a base64 image string using Gemini 2.5 Flash.
  */
-export const extractEventFromImage = async (base64String) => {
+const extractEventFromImage = async (base64String) => {
   try {
     if (!process.env.GEMINI_API_KEY) {
       throw new Error("Missing GEMINI_API_KEY in process.env!");
     }
 
-    // Strip out the data URL prefix if present to get raw base64
     const cleanBase64 = base64String.replace(/^data:image\/\w+;base64,/, "");
 
+    // Notice we updated the system prompt to ask for an array of ALL events here too!
     const systemPrompt = `You are a strict data extraction AI. Scan the provided image and extract ALL events listed on it.
     For each event, extract the event name, date, time, and location. Calculate a confidence score between 0.0 and 1.0.
 
@@ -29,7 +29,6 @@ export const extractEventFromImage = async (base64String) => {
       ]
     }`;
 
-    // Target the ultra-fast multimodal model
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const response = await fetch(url, {
@@ -53,7 +52,7 @@ export const extractEventFromImage = async (base64String) => {
           }
         ],
         generationConfig: {
-          responseMimeType: "application/json", // Forces Gemini to return pure JSON
+          responseMimeType: "application/json",
           temperature: 0
         }
       })
@@ -64,9 +63,7 @@ export const extractEventFromImage = async (base64String) => {
       throw new Error(data.error?.message || "Gemini API Request Failed");
     }
 
-    // Extract the text response block
     const responseText = data.candidates[0].content.parts[0].text.trim();
-    
     return JSON.parse(responseText);
 
   } catch (error) {
@@ -74,3 +71,6 @@ export const extractEventFromImage = async (base64String) => {
     throw error;
   }
 };
+
+// Export using CommonJS syntax
+module.exports = { extractEventFromImage };
