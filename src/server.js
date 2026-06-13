@@ -25,7 +25,7 @@ app.use('/api/v1/empathy', require('./modules/empathyMesh/empathy.routes'));
 app.use('/api/v1/community', require('./modules/communityEngine/community.routes'));
 app.use('/api/v1/retrieval', require('./modules/retrievalEngine/retrieval.routes'));
 app.use('/api/v1/transit', require('./modules/transitEngine/transit.routes'));
-app.use('/api/v1/presence', require('./modules/presenceEngine/presence.routes')); // <-- New Presence Route
+app.use('/api/v1/presence', require('./modules/presenceEngine/presence.routes')); 
 
 // --- Bootstrapper Function ---
 const bootstrapAlarms = async () => {
