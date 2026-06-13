@@ -1,13 +1,13 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-// const connectDB = require('./core/db');
+const connectDB = require('./core/db');
 
 // Initialize App
 const app = express();
 
 // Connect to Database
-// connectDB(); // TODO: Uncomment once you add MONGO_URI to your .env file
+connectDB(); // TODO: Uncomment once you add MONGO_URI to your .env file
 
 // Middleware
 app.use(cors());
@@ -21,6 +21,8 @@ app.get('/', (req, res) => {
 
 // Module Routes will be mounted here later
 // e.g., app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
+// Mount Override Engine Routes
+app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
 
 // Start Server
 const PORT = process.env.PORT || 5000;
