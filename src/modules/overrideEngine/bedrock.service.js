@@ -1,57 +1,56 @@
-import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
+// src/modules/overrideEngine/bedrock.service.js
+require('dotenv').config();
 
-// Initialize the Bedrock client
-const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION || "us-east-1" });
-
-/**
- * Extracts event details from a base64 image string.
- * @param {string} base64String - The image data (can include data URI prefix)
- * @returns {Promise<Object>} The parsed JSON event data
- */
-export const extractEventFromImage = async (base64String) => {
+exports.processImageWithBedrock = async (base64String) => {
   try {
-    // Strip the data URI prefix if it exists to get pure base64
-    const cleanBase64 = base64String.replace(/^data:image\/\w+;base64,/, "");
-    const imageBuffer = Buffer.from(cleanBase64, "base64");
+    if (!process.env.GEMINI_API_KEY) {
+      throw new Error("Missing GEMINI_API_KEY in process.env!");
+    }
 
-    const systemPrompt = `You are a strict data extraction AI. Extract the event name, date, time, and location from the provided image. 
-    You must calculate a confidence score between 0.0 and 1.0 based on how clearly the text is legible.
-    Return ONLY a valid JSON object matching this exact schema:
+    const cleanBase64 = base64String.replace(/^data:image\/\w+;base64,/, "");
+
+    const systemPrompt = `You are a strict data extraction AI. Scan the provided image and extract ALL events listed on it.
+    For each event, extract the event name, date, time, and location. Calculate a confidence score between 0.0 and 1.0.
+
+    Return ONLY a raw, valid JSON object matching this exact schema:
     {
-      "eventName": "string",
-      "date": "YYYY-MM-DD",
-      "time": "HH:MM",
-      "location": "string",
-      "confidenceScore": number
+      "events": [
+        {
+          "eventName": "string",
+          "date": "YYYY-MM-DD",
+          "time": "HH:MM",
+          "location": "string",
+          "confidenceScore": number
+        }
+      ]
     }`;
 
-    const command = new ConverseCommand({
-      modelId: "anthropic.claude-3-haiku-20240307-v1:0",
-      system: [{ text: systemPrompt }],
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              image: {
-                format: "jpeg", // Bedrock accepts jpeg, png, webp
-                source: { bytes: imageBuffer },
-              },
-            },
-            { text: "Extract the details from this flyer." }
-          ],
-        },
-      ],
-      inferenceConfig: { temperature: 0 }, // 0 ensures deterministic JSON output
+    // Using User 3's specific 2.5-flash model via raw fetch
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: systemPrompt },
+            { text: "Extract the details from this flyer image." },
+            { inlineData: { mimeType: "image/jpeg", data: cleanBase64 } }
+          ]
+        }],
+        generationConfig: { responseMimeType: "application/json", temperature: 0 }
+      })
     });
 
-    const response = await bedrockClient.send(command);
-    const responseText = response.output.message.content[0].text;
-    
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || "Gemini API Request Failed");
+
+    const responseText = data.candidates[0].content.parts[0].text.trim();
     return JSON.parse(responseText);
 
   } catch (error) {
-    console.error("Bedrock OCR Error:", error);
-    throw new Error("Failed to extract data from image.");
+    console.error("Gemini OCR Processing Error:", error);
+    throw error;
   }
 };
