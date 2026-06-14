@@ -27,6 +27,7 @@ app.use('/api/v1/auth', require('./modules/authEngine/auth.routes'));
 app.use('/api/v1/overrides', protect, require('./modules/overrideEngine/override.routes'));
 app.use('/api/v1/pocket', protect, require('./modules/pocketBuddy/pocket.routes'));
 app.use('/api/v1/empathy', protect, require('./modules/empathyMesh/empathy.routes'));
+app.use('/api/v1/wellness', protect, require('./modules/wellnessEngine/wellness.routes'));
 app.use('/api/v1/community', protect, require('./modules/communityEngine/community.routes'));
 app.use('/api/v1/retrieval', protect, require('./modules/retrievalEngine/retrieval.routes'));
 app.use('/api/v1/transit', protect, require('./modules/transitEngine/transit.routes'));
