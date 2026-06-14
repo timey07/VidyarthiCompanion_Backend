@@ -4,6 +4,7 @@ const cors = require('cors');
 const connectDB = require('./core/db');
 const AcademicEvent = require('./sharedModels/AcademicEvent.model');
 const alertScheduler = require('./core/alertScheduler');
+const { protect } = require('./core/authMiddleware');
 
 // Initialize App
 const app = express();
@@ -19,13 +20,17 @@ app.get('/', (req, res) => {
 });
 
 // --- Mount All Routes Here ---
-app.use('/api/v1/overrides', require('./modules/overrideEngine/override.routes'));
-app.use('/api/v1/pocket', require('./modules/pocketBuddy/pocket.routes'));
-app.use('/api/v1/empathy', require('./modules/empathyMesh/empathy.routes'));
-app.use('/api/v1/community', require('./modules/communityEngine/community.routes'));
-app.use('/api/v1/retrieval', require('./modules/retrievalEngine/retrieval.routes'));
-app.use('/api/v1/transit', require('./modules/transitEngine/transit.routes'));
-app.use('/api/v1/presence', require('./modules/presenceEngine/presence.routes')); 
+// Public auth routes (register/login). /auth/me is protected internally.
+app.use('/api/v1/auth', require('./modules/authEngine/auth.routes'));
+
+// All feature routes require a valid JWT. `protect` populates req.user.
+app.use('/api/v1/overrides', protect, require('./modules/overrideEngine/override.routes'));
+app.use('/api/v1/pocket', protect, require('./modules/pocketBuddy/pocket.routes'));
+app.use('/api/v1/empathy', protect, require('./modules/empathyMesh/empathy.routes'));
+app.use('/api/v1/community', protect, require('./modules/communityEngine/community.routes'));
+app.use('/api/v1/retrieval', protect, require('./modules/retrievalEngine/retrieval.routes'));
+app.use('/api/v1/transit', protect, require('./modules/transitEngine/transit.routes'));
+app.use('/api/v1/presence', protect, require('./modules/presenceEngine/presence.routes'));
 
 // --- Bootstrapper Function ---
 const bootstrapAlarms = async () => {

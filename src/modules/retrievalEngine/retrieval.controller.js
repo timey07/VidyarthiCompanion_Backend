@@ -3,10 +3,11 @@ require('dotenv').config();
 
 exports.askCampusFlow = async (req, res) => {
   try {
-    const { query, userId } = req.body;
+    const userId = req.user.userId;
+    const { query } = req.body;
 
-    if (!query || !userId) {
-      return res.status(400).json({ success: false, message: 'Missing query or userId' });
+    if (!query) {
+      return res.status(400).json({ success: false, message: 'Missing query' });
     }
 
     console.log(`User ${userId} asked: "${query}"`);

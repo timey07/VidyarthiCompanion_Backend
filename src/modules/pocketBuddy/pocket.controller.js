@@ -1,9 +1,10 @@
 exports.processTransaction = async (req, res) => {
   try {
-    const { userId, vendor, amount, transactionType } = req.body;
+    const userId = req.user.userId;
+    const { vendor, amount, transactionType } = req.body;
 
-    if (!userId || !amount) {
-      return res.status(400).json({ success: false, message: 'Missing userId or amount' });
+    if (!amount) {
+      return res.status(400).json({ success: false, message: 'Missing amount' });
     }
 
     // TODO: Later, we will use meal.service.js to check if they have enough budget left.
