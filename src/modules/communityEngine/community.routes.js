@@ -1,14 +1,29 @@
 const express = require('express');
 const router = express.Router();
-const { submitVote, listScheduleEvents, submitEventVote } = require('./community.controller');
+const { submitVote, listScheduleEvents, submitEventVote, listAlerts } = require('./community.controller');
+const {
+  createNode,
+  listMyNodes,
+  listAllNodes,
+  joinNode,
+  leaveNode,
+  listNodeMembers,
+} = require('./node.controller');
 
-// POST /api/v1/community/vote          -> vote on a community alert (e.g. mess)
+// --- Alerts (mess / wellness) ---
 router.post('/vote', submitVote);
+router.get('/alerts', listAlerts);
 
-// GET  /api/v1/community/events        -> schedule feed with consensus state
+// --- Academic event consensus ---
 router.get('/events', listScheduleEvents);
-
-// POST /api/v1/community/events/vote   -> trust-weighted consensus vote on an event
 router.post('/events/vote', submitEventVote);
+
+// --- Multi-Tiered Community Graph (nodes) ---
+router.post('/nodes', createNode);
+router.get('/nodes', listMyNodes);
+router.get('/nodes/all', listAllNodes);
+router.post('/nodes/:nodeId/join', joinNode);
+router.post('/nodes/:nodeId/leave', leaveNode);
+router.get('/nodes/:nodeId/members', listNodeMembers);
 
 module.exports = router;

@@ -14,14 +14,20 @@ const extractEventFromImage = async (base64String) => {
     const systemPrompt = `You are a strict data extraction AI. Scan the provided image and extract ALL events listed on it.
     For each event, extract the event name, date, time, and location. Calculate a confidence score between 0.0 and 1.0.
 
+    DATE RULES (critical):
+    - Only output a date that is explicitly visible in the image.
+    - NEVER invent, guess, or default a date. If no date is shown, set "date" to null.
+    - Do NOT fall back to January 1st or any placeholder date.
+    Apply the same rule to "time" and "location": if not visible, set them to null.
+
     Return ONLY a raw, valid JSON object matching this exact schema:
     {
       "events": [
         {
           "eventName": "string",
-          "date": "YYYY-MM-DD",
-          "time": "HH:MM",
-          "location": "string",
+          "date": "YYYY-MM-DD or null",
+          "time": "HH:MM or null",
+          "location": "string or null",
           "confidenceScore": number
         }
       ]

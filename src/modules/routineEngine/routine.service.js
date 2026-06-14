@@ -2,6 +2,7 @@ const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const User = require('../../sharedModels/User.model');
 const { calculateBurnoutScore } = require('../empathyMesh/safeSkip.service');
 const { calculateAffordableMeals, daysRemainingInMonth } = require('../pocketBuddy/meal.service');
+const { getUserNodeIds } = require('../communityEngine/node.controller');
 
 // How far ahead the daily plan looks (today + upcoming week).
 const HORIZON_DAYS = 7;
@@ -35,9 +36,16 @@ const assembleDailyPlan = async (userId) => {
   const horizon = new Date(start);
   horizon.setDate(horizon.getDate() + HORIZON_DAYS);
 
+  // Events visible to the user: their own + anything shared with their nodes.
+  const myNodeIds = await getUserNodeIds(userId);
+
   const [user, events, burnout] = await Promise.all([
     User.findOne({ userId }),
-    AcademicEvent.find({ userId, date: { $gte: start, $lte: horizon }, status: { $ne: 'rejected' } }).sort({ date: 1 }),
+    AcademicEvent.find({
+      $or: [{ userId }, { nodeId: { $in: myNodeIds } }],
+      date: { $gte: start, $lte: horizon },
+      status: { $ne: 'rejected' },
+    }).sort({ date: 1 }),
     calculateBurnoutScore(userId),
   ]);
 
