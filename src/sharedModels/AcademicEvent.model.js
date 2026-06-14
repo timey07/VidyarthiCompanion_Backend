@@ -6,6 +6,12 @@ const academicEventSchema = new mongoose.Schema({
     required: true, 
     index: true 
   },
+  // Community node this event is shared with (null = personal/private).
+  nodeId: {
+    type: String,
+    default: null,
+    index: true,
+  },
   eventName: { 
     type: String, 
     required: true 
