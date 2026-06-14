@@ -6,12 +6,10 @@ const mongoose = require('mongoose');
  * are visible to all its members, and the node owner (CR) carries extra
  * consensus weight in the trust graph.
  *
- * Three NATURES drive behaviour (the product USP):
+ * Two NATURES drive behaviour (the product USP):
  *  - accountability : task/schedule groups (class, mess, gym). Members don't
  *                     need to know each other, but updates must reach everyone.
  *                     Consensus voting is ENABLED here.
- *  - individuality  : confidential safe-spaces (ADHD, LGBTQ+). Raw shared data,
- *                     consensus voting is DISABLED (a "Zero-Telemetry Zone").
  *  - wellbeing      : silent listeners that receive anonymous Empathy Nudges
  *                     when a member's wellness score drops.
  *
@@ -39,7 +37,7 @@ const communityNodeSchema = new mongoose.Schema(
     // The behavioural nature of the community (drives consensus + telemetry rules).
     nature: {
       type: String,
-      enum: ['accountability', 'individuality', 'wellbeing'],
+      enum: ['accountability', 'wellbeing'],
       default: 'accountability',
       index: true,
     },
@@ -59,8 +57,13 @@ const communityNodeSchema = new mongoose.Schema(
       default: 'open',
     },
 
-    // The class representative / owner (extra trust weight in consensus + admin).
+    // The class representative / primary owner (also used to reassign admin
+    // when the current admins all leave).
     crUserId: { type: String, default: null },
+
+    // All users with admin powers (approve requests, promote others, manage).
+    // The creator starts as the sole admin; admins can promote other members.
+    admins: { type: [String], default: [] },
 
     members: { type: [String], default: [], index: true },
 

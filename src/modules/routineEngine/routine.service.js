@@ -41,11 +41,12 @@ const assembleDailyPlan = async (userId) => {
 
   const [user, events, burnout] = await Promise.all([
     User.findOne({ userId }),
-    // Only FUTURE events (passed events are dropped from Today's Plan).
+    // Only FUTURE, consensus-VERIFIED events reach Today's Plan (more echoes
+    // than flags). Pending / rejected updates live only in the community feed.
     AcademicEvent.find({
       $or: [{ userId }, { nodeId: { $in: myNodeIds } }],
       date: { $gte: now, $lte: horizon },
-      status: { $ne: 'rejected' },
+      status: 'verified',
     }).sort({ date: 1 }),
     calculateBurnoutScore(userId),
   ]);
