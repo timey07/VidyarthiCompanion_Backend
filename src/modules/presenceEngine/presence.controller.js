@@ -3,8 +3,9 @@ const { calculateDistance, campusZones } = require('./geofence.service');
 
 exports.pingLocation = async (req, res) => {
   try {
-    const { userId, lat, lng } = req.body;
-    if (!userId || !lat || !lng) return res.status(400).json({ success: false, message: 'Missing GPS data' });
+    const userId = req.user.userId;
+    const { lat, lng } = req.body;
+    if (!lat || !lng) return res.status(400).json({ success: false, message: 'Missing GPS data' });
 
     let checkedInZone = null;
 

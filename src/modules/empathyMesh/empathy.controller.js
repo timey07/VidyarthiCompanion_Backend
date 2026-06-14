@@ -4,9 +4,10 @@ const safeSkipService = require('./safeSkip.service');
 // 1. Let students log their lifestyle data
 exports.logLifestyleMetric = async (req, res) => {
   try {
-    const { userId, logType, severity, notes } = req.body;
+    const userId = req.user.userId;
+    const { logType, severity, notes } = req.body;
 
-    if (!userId || !logType || !severity) {
+    if (!logType || !severity) {
       return res.status(400).json({ success: false, message: 'Missing required logging fields.' });
     }
 
@@ -26,11 +27,7 @@ exports.logLifestyleMetric = async (req, res) => {
 // 2. Evaluate if a student qualifies for a Safe-Skip right now
 exports.evaluateSafeSkip = async (req, res) => {
   try {
-    const { userId } = req.params;
-
-    if (!userId) {
-      return res.status(400).json({ success: false, message: 'Missing userId parameter.' });
-    }
+    const userId = req.user.userId;
 
     const evaluation = await safeSkipService.calculateBurnoutScore(userId);
 

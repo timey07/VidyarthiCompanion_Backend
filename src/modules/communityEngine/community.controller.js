@@ -2,10 +2,11 @@ const CommunityAlert = require('../../sharedModels/CommunityAlert.model');
 
 exports.submitVote = async (req, res) => {
   try {
-    const { eventId, voteType, userId } = req.body;
+    const userId = req.user.userId;
+    const { eventId, voteType } = req.body;
 
-    if (!eventId || !voteType || !userId) {
-      return res.status(400).json({ success: false, message: 'Missing eventId, voteType, or userId' });
+    if (!eventId || !voteType) {
+      return res.status(400).json({ success: false, message: 'Missing eventId or voteType' });
     }
 
     // 1. Find the alert (or create a mock one if it doesn't exist yet for testing)

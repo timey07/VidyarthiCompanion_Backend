@@ -4,10 +4,11 @@ const alertScheduler = require('../../core/alertScheduler');
 
 exports.verifyOverride = async (req, res) => {
   try {
-    const { userId, eventType, imageString } = req.body;
+    const userId = req.user.userId;
+    const { eventType, imageString } = req.body;
 
-    if (!userId || !imageString) {
-      return res.status(400).json({ success: false, message: 'Missing userId or image data' });
+    if (!imageString) {
+      return res.status(400).json({ success: false, message: 'Missing image data' });
     }
 
     const extractedData = await bedrockService.extractEventFromImage(imageString);
