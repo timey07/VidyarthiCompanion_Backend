@@ -1,6 +1,6 @@
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const { getUserNodeIds } = require('../communityEngine/node.controller');
-const { estimateTransit } = require('./transit.service');
+const { estimateTransit, estimateModes } = require('./transit.service');
 
 const fmtMins = (m) => (m <= 0 ? 'Leave now' : `${m} min`);
 
@@ -40,6 +40,13 @@ exports.calculateDeparture = async (req, res) => {
     const minutesUntil = Math.round((nextEvent.date.getTime() - now.getTime()) / 60000);
     const leaveInMinutes = minutesUntil - travelMinutes;
 
+    // Per-mode options (Walking / Cycling / Auto) with their own leave-in.
+    const modes = estimateModes(currentLocation, nextEvent.location).map((m) => ({
+      mode: m.mode,
+      travelMinutes: m.travelMinutes,
+      leaveIn: fmtMins(minutesUntil - m.travelMinutes),
+    }));
+
     // Urgency: already late/now -> critical, within 15 min -> warning, else safe.
     let status = 'safe';
     if (leaveInMinutes <= 0) status = 'critical';
@@ -63,6 +70,7 @@ exports.calculateDeparture = async (req, res) => {
         leaveIn: fmtMins(leaveInMinutes),
         minutesUntil,
         distanceKm,
+        modes,
       },
     });
   } catch (error) {

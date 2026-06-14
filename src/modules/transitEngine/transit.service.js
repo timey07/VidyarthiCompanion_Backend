@@ -2,6 +2,7 @@ const { calculateDistance, campusZones } = require('../presenceEngine/geofence.s
 
 // Rough India-centric speeds (km/h) for travel-time estimates.
 const WALK_KMH = 5;
+const CYCLE_KMH = 15;
 const AUTO_KMH = 18;
 const WALK_MAX_KM = 1.2; // below this, walking is assumed
 
@@ -54,4 +55,39 @@ const estimateTransit = (currentLocation, eventLocation) => {
   };
 };
 
-module.exports = { estimateTransit };
+/**
+ * Estimate travel time for multiple modes (Walking, Cycling, and Auto when far
+ * or off-campus). Used by the departure alert which shows mode options.
+ */
+const estimateModes = (currentLocation, eventLocation) => {
+  const coords = parseCoords(currentLocation);
+  const zone = eventLocation ? campusZones[eventLocation] : null;
+
+  let distanceKm = null;
+  if (coords && zone) {
+    distanceKm = calculateDistance(coords.lat, coords.lng, zone.lat, zone.lng) / 1000;
+  }
+
+  const round = (v) => Math.max(2, Math.round(v));
+  const modes = [];
+
+  if (distanceKm != null) {
+    modes.push({ mode: 'Walking', travelMinutes: round((distanceKm / WALK_KMH) * 60), distanceKm: Number(distanceKm.toFixed(2)) });
+    modes.push({ mode: 'Cycling', travelMinutes: round((distanceKm / CYCLE_KMH) * 60), distanceKm: Number(distanceKm.toFixed(2)) });
+    if (distanceKm > 3) {
+      modes.push({ mode: 'Auto Rickshaw', travelMinutes: round((distanceKm / AUTO_KMH) * 60 + 5), distanceKm: Number(distanceKm.toFixed(2)) });
+    }
+  } else if (currentLocation === 'campus') {
+    modes.push({ mode: 'Walking', travelMinutes: 10, distanceKm: null });
+    modes.push({ mode: 'Cycling', travelMinutes: 5, distanceKm: null });
+  } else {
+    // Off-campus / unknown distance.
+    modes.push({ mode: 'Walking', travelMinutes: 45, distanceKm: null });
+    modes.push({ mode: 'Cycling', travelMinutes: 20, distanceKm: null });
+    modes.push({ mode: 'Auto Rickshaw', travelMinutes: 30, distanceKm: null });
+  }
+
+  return modes;
+};
+
+module.exports = { estimateTransit, estimateModes };
