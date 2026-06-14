@@ -1,6 +1,10 @@
-require('dotenv').config();
+import dotenv from 'dotenv';
+dotenv.config();
 
-exports.processImageWithBedrock = async (base64String) => {
+/**
+ * Extracts all event details from a base64 image string using Gemini 2.5 Flash.
+ */
+export const extractEventFromImage = async (base64String) => {
   try {
     if (!process.env.GEMINI_API_KEY) {
       throw new Error("Missing GEMINI_API_KEY in process.env!");
@@ -24,21 +28,26 @@ exports.processImageWithBedrock = async (base64String) => {
       ]
     }`;
 
-    // Using User 3's specific 2.5-flash model via raw fetch
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    // Reverted back to the highly available Gemini 2.5 Flash model
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: systemPrompt },
-            { text: "Extract the details from this flyer image." },
-            { inlineData: { mimeType: "image/jpeg", data: cleanBase64 } }
-          ]
-        }],
-        generationConfig: { responseMimeType: "application/json", temperature: 0 }
+        contents: [
+          {
+            parts: [
+              { text: systemPrompt },
+              { text: "Extract all listed details from this flyer image." },
+              { inlineData: { mimeType: "image/jpeg", data: cleanBase64 } }
+            ]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0
+        }
       })
     });
 
