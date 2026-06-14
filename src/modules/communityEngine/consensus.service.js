@@ -85,9 +85,72 @@ const seedCreatorConsensus = async (event, creatorUserId) => {
   return event;
 };
 
+const normalize = (s) => String(s || '').trim().toLowerCase();
+
+/**
+ * Find an existing event that represents the SAME real-world entry as the
+ * incoming one (same name + location + start minute, within the same scope).
+ *  - Node-shared events match across users (so two members uploading the same
+ *    class collapse into one shared event).
+ *  - Personal events (no node) match only within the same user (privacy).
+ */
+const findDuplicate = async ({ userId, nodeId, eventName, date, location }) => {
+  const minuteStart = new Date(date);
+  minuteStart.setSeconds(0, 0);
+  const minuteEnd = new Date(minuteStart);
+  minuteEnd.setMinutes(minuteEnd.getMinutes() + 1);
+
+  const query = { date: { $gte: minuteStart, $lt: minuteEnd } };
+  if (nodeId) query.nodeId = nodeId;
+  else {
+    query.nodeId = null;
+    query.userId = userId;
+  }
+
+  const candidates = await AcademicEvent.find(query);
+  return (
+    candidates.find(
+      (e) => normalize(e.eventName) === normalize(eventName) && normalize(e.location) === normalize(location)
+    ) || null
+  );
+};
+
+/**
+ * Create an event, or de-duplicate against an existing identical one:
+ *  - new entry            -> create + seed the creator's vouch
+ *  - duplicate, new voter  -> echo it (trust-weighted consensus goes UP)
+ *  - duplicate, same voter -> no change (idempotent)
+ *
+ * @returns {Promise<{event, status: 'created'|'merged'|'unchanged'}>}
+ */
+const upsertEvent = async ({ userId, nodeId, eventName, date, location, confidenceScore }) => {
+  const dup = await findDuplicate({ userId, nodeId, eventName, date, location });
+
+  if (dup) {
+    const alreadyVoted = await ConsensusVote.findOne({ eventId: dup._id, userId });
+    if (alreadyVoted) {
+      return { event: dup, status: 'unchanged' };
+    }
+    const result = await applyVote({ eventId: dup._id.toString(), userId, voteType: 1 });
+    return { event: result.event, status: 'merged' };
+  }
+
+  const created = await AcademicEvent.create({
+    userId,
+    nodeId: nodeId || null,
+    eventName,
+    date,
+    location,
+    confidenceScore: confidenceScore ?? 0.5,
+  });
+  await seedCreatorConsensus(created, userId);
+  return { event: created, status: 'created' };
+};
+
 module.exports = {
   applyVote,
   seedCreatorConsensus,
+  upsertEvent,
   promoteStatus,
   getTallies,
   VERIFY_THRESHOLD,
