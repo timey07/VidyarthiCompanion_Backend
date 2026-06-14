@@ -9,9 +9,9 @@ const {
   joinByCode,
   leaveNode,
   approveRequest,
+  promoteMember,
   listNodeMembers,
   getNodeFeed,
-  postNodeUpdate,
 } = require('./node.controller');
 
 // --- Alerts (wellbeing / wellness nudges) ---
@@ -29,8 +29,8 @@ router.post('/nodes/join-by-code', joinByCode);
 router.post('/nodes/:nodeId/join', joinNode);
 router.post('/nodes/:nodeId/leave', leaveNode);
 router.post('/nodes/:nodeId/approve', approveRequest);
+router.post('/nodes/:nodeId/admins', promoteMember);
 router.get('/nodes/:nodeId/members', listNodeMembers);
 router.get('/nodes/:nodeId/feed', getNodeFeed);
-router.post('/nodes/:nodeId/updates', postNodeUpdate);
 
 module.exports = router;

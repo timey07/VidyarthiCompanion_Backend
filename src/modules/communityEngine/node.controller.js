@@ -2,8 +2,6 @@ const CommunityNode = require('../../sharedModels/CommunityNode.model');
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
 const User = require('../../sharedModels/User.model');
-const consensusService = require('./consensus.service');
-const alertScheduler = require('../../core/alertScheduler');
 
 /** Build a stable, unique-ish nodeId slug from a name. */
 const buildNodeId = (name) => {
@@ -34,24 +32,32 @@ exports.getUserNodeIds = async (userId) =>
 /** Whether consensus voting applies to a given nature (only accountability). */
 const votingEnabled = (nature) => nature === 'accountability';
 
+/** Whether a user has admin powers over a node. */
+const isAdminOf = (node, userId) =>
+  (node.admins || []).includes(userId) || node.crUserId === userId;
+
 /** Map a node doc into the shape the client expects. */
-const toNodeDTO = (n, userId) => ({
-  nodeId: n.nodeId,
-  name: n.name,
-  description: n.description || '',
-  nodeType: n.nodeType,
-  nature: n.nature,
-  visibility: n.visibility,
-  joinPolicy: n.joinPolicy,
-  memberCount: n.members.length,
-  isMember: n.members.includes(userId),
-  isCr: n.crUserId === userId,
-  isPending: (n.pendingRequests || []).includes(userId),
-  pendingCount: (n.pendingRequests || []).length,
-  votingEnabled: votingEnabled(n.nature),
-  // Only the owner ever sees the invite code.
-  inviteCode: n.crUserId === userId ? n.inviteCode : undefined,
-});
+const toNodeDTO = (n, userId) => {
+  const admin = isAdminOf(n, userId);
+  return {
+    nodeId: n.nodeId,
+    name: n.name,
+    description: n.description || '',
+    nodeType: n.nodeType,
+    nature: n.nature,
+    visibility: n.visibility,
+    joinPolicy: n.joinPolicy,
+    memberCount: n.members.length,
+    isMember: n.members.includes(userId),
+    isCr: admin,
+    isAdmin: admin,
+    isPending: (n.pendingRequests || []).includes(userId),
+    pendingCount: (n.pendingRequests || []).length,
+    votingEnabled: votingEnabled(n.nature),
+    // Only admins ever see the invite code.
+    inviteCode: admin ? n.inviteCode : undefined,
+  };
+};
 
 // POST /api/v1/community/nodes
 exports.createNode = async (req, res) => {
@@ -61,7 +67,7 @@ exports.createNode = async (req, res) => {
     if (!name || !name.trim())
       return res.status(400).json({ success: false, message: 'Community name is required.' });
 
-    const safeNature = ['accountability', 'individuality', 'wellbeing'].includes(nature)
+    const safeNature = ['accountability', 'wellbeing'].includes(nature)
       ? nature
       : 'accountability';
     const safeVisibility = visibility === 'private' ? 'private' : 'public';
@@ -78,6 +84,7 @@ exports.createNode = async (req, res) => {
       joinPolicy: safeVisibility === 'public' ? safeJoinPolicy : 'locked',
       // The creator owns and administers the community they made.
       crUserId: userId,
+      admins: [userId],
       members: [userId],
       pendingRequests: [],
       inviteCode: safeVisibility === 'private' ? buildInviteCode() : null,
@@ -189,18 +196,52 @@ exports.joinByCode = async (req, res) => {
 };
 
 // POST /api/v1/community/nodes/:nodeId/leave
+// Self-healing membership:
+//  - if the last member leaves, the community (and its updates) are deleted
+//  - if an admin leaves and no admins remain, the oldest remaining member is
+//    promoted to admin so the community is never left leaderless
 exports.leaveNode = async (req, res) => {
   try {
     const userId = req.user.userId;
     const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
     if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
 
+    const remaining = node.members.filter((m) => m !== userId);
+
+    // Last one out: tear the whole community down (updates + votes included).
+    if (remaining.length === 0) {
+      const events = await AcademicEvent.find({ nodeId: node.nodeId }).select('_id');
+      const eventIds = events.map((e) => e._id);
+      if (eventIds.length) await ConsensusVote.deleteMany({ eventId: { $in: eventIds } });
+      await AcademicEvent.deleteMany({ nodeId: node.nodeId });
+      await CommunityNode.deleteOne({ nodeId: node.nodeId });
+      await syncUserNodes(userId);
+      return res
+        .status(200)
+        .json({ success: true, status: 'deleted', message: `${node.name} was disbanded.` });
+    }
+
+    let admins = (node.admins || []).filter((a) => a !== userId);
+    let crUserId = node.crUserId;
+
+    // No admins left -> promote the oldest remaining member (join order).
+    if (admins.length === 0) {
+      admins = [remaining[0]];
+      crUserId = remaining[0];
+    } else if (crUserId === userId) {
+      // Primary owner left but other admins remain: hand the title to one.
+      crUserId = admins[0];
+    }
+
     await CommunityNode.updateOne(
       { nodeId: node.nodeId },
-      { $pull: { members: userId, pendingRequests: userId } }
+      {
+        $set: { members: remaining, admins, crUserId },
+        $pull: { pendingRequests: userId },
+      }
     );
     await syncUserNodes(userId);
-    return res.status(200).json({ success: true, message: `Left ${node.name}.` });
+    return res.status(200).json({ success: true, status: 'left', message: `Left ${node.name}.` });
   } catch (error) {
     console.error('Leave Node Error:', error);
     return res.status(500).json({ success: false, message: 'Server error leaving community.' });
@@ -208,15 +249,15 @@ exports.leaveNode = async (req, res) => {
 };
 
 // POST /api/v1/community/nodes/:nodeId/approve   { userId }
-// Owner-only: approve a pending join request on a locked public community.
+// Admin-only: approve a pending join request on a locked public community.
 exports.approveRequest = async (req, res) => {
   try {
-    const ownerId = req.user.userId;
+    const requesterId = req.user.userId;
     const targetUserId = req.body.userId;
     const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
     if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
-    if (node.crUserId !== ownerId && req.user.role !== 'admin') {
-      return res.status(403).json({ success: false, message: 'Only the community admin can approve members.' });
+    if (!isAdminOf(node, requesterId) && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only an admin can approve members.' });
     }
     if (!targetUserId || !node.pendingRequests.includes(targetUserId)) {
       return res.status(400).json({ success: false, message: 'No such pending request.' });
@@ -231,6 +272,32 @@ exports.approveRequest = async (req, res) => {
   } catch (error) {
     console.error('Approve Request Error:', error);
     return res.status(500).json({ success: false, message: 'Server error approving member.' });
+  }
+};
+
+// POST /api/v1/community/nodes/:nodeId/admins   { userId }
+// Admin-only: promote an existing member to admin.
+exports.promoteMember = async (req, res) => {
+  try {
+    const requesterId = req.user.userId;
+    const targetUserId = req.body.userId;
+    const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
+    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
+    if (!isAdminOf(node, requesterId) && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only an admin can promote members.' });
+    }
+    if (!targetUserId || !node.members.includes(targetUserId)) {
+      return res.status(400).json({ success: false, message: 'That user is not a member.' });
+    }
+
+    await CommunityNode.updateOne(
+      { nodeId: node.nodeId },
+      { $addToSet: { admins: targetUserId } }
+    );
+    return res.status(200).json({ success: true, message: 'Member promoted to admin.' });
+  } catch (error) {
+    console.error('Promote Member Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error promoting member.' });
   }
 };
 
@@ -252,12 +319,13 @@ exports.listNodeMembers = async (req, res) => {
       name: u.name,
       role: u.role,
       trustScore: u.trustScore,
-      isCr: node.crUserId === u.userId,
+      isCr: isAdminOf(node, u.userId),
+      isAdmin: isAdminOf(node, u.userId),
     }));
 
-    // Surface pending requests so the owner can approve them.
+    // Surface pending requests so admins can approve them.
     let pending = [];
-    if (node.crUserId === userId || req.user.role === 'admin') {
+    if (isAdminOf(node, userId) || req.user.role === 'admin') {
       const pendingUsers = await User.find({ userId: { $in: node.pendingRequests } }).select(
         'userId name role'
       );
@@ -327,56 +395,5 @@ exports.getNodeFeed = async (req, res) => {
   } catch (error) {
     console.error('Get Node Feed Error:', error);
     return res.status(500).json({ success: false, message: 'Server error loading community feed.' });
-  }
-};
-
-// POST /api/v1/community/nodes/:nodeId/updates   { eventName, date, location }
-// Any member can broadcast an update into the community. It enters the feed as
-// PENDING and rises to VERIFIED once peers Echo it past the consensus threshold.
-exports.postNodeUpdate = async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
-    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
-    if (!node.members.includes(userId)) {
-      return res.status(403).json({ success: false, message: 'Join this community to post updates.' });
-    }
-
-    const { eventName, date, location } = req.body;
-    if (!eventName || !eventName.trim()) {
-      return res.status(400).json({ success: false, message: 'An update title is required.' });
-    }
-
-    const when = date ? new Date(date) : new Date();
-    if (Number.isNaN(when.getTime())) {
-      return res.status(400).json({ success: false, message: 'Invalid date/time.' });
-    }
-
-    const { event: saved, status } = await consensusService.upsertEvent({
-      userId,
-      nodeId: node.nodeId,
-      eventName: eventName.trim(),
-      date: when,
-      location: (location && location.trim()) || 'TBD',
-      confidenceScore: 1.0, // a human-posted update is high-confidence by definition
-    });
-
-    if (status === 'created') alertScheduler.scheduleEventAlert(saved);
-
-    return res.status(status === 'created' ? 201 : 200).json({
-      success: true,
-      mergeStatus: status,
-      data: {
-        id: saved._id,
-        eventName: saved.eventName,
-        date: saved.date,
-        location: saved.location,
-        consensusScore: saved.consensusScore,
-        status: saved.status,
-      },
-    });
-  } catch (error) {
-    console.error('Post Node Update Error:', error);
-    return res.status(500).json({ success: false, message: 'Server error posting update.' });
   }
 };

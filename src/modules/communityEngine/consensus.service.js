@@ -1,26 +1,21 @@
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
-const User = require('../../sharedModels/User.model');
 
-// Trust-weighted thresholds. A single CR (trustScore 3) verifies an event;
-// three independent students (1 each) do the same. Symmetric for rejection.
-const VERIFY_THRESHOLD = 3;
-const REJECT_THRESHOLD = -3;
-
-/** Map a numeric consensus score to a lifecycle status. */
-const promoteStatus = (score) => {
-  if (score >= VERIFY_THRESHOLD) return 'verified';
-  if (score <= REJECT_THRESHOLD) return 'rejected';
+/**
+ * Simple majority consensus (raw head-count, not trust-weighted):
+ *  - more echoes than flags  -> 'verified' (flows to Dashboard + Master Calendar)
+ *  - more flags than echoes   -> 'rejected' (stays in the community feed only)
+ *  - tie                      -> 'pending'  (stays in the community feed only)
+ *
+ * Only 'verified' updates ever reach the dashboard / master calendar.
+ */
+const computeStatus = (echoes, flags) => {
+  if (echoes > flags) return 'verified';
+  if (flags > echoes) return 'rejected';
   return 'pending';
 };
 
-/** Look up a voter's trust weight (defaults to 1 for unknown users). */
-const getTrustWeight = async (userId) => {
-  const user = await User.findOne({ userId });
-  return user?.trustScore ?? 1;
-};
-
-/** Aggregate raw echo/flag tallies for an event (head-count, not weighted). */
+/** Aggregate raw echo/flag tallies for an event. */
 const getTallies = async (eventId) => {
   const votes = await ConsensusVote.find({ eventId }).select('voteType');
   const echoes = votes.filter((v) => v.voteType === 1).length;
@@ -28,9 +23,18 @@ const getTallies = async (eventId) => {
   return { echoes, flags, totalVotes: votes.length };
 };
 
+/** Recompute an event's net score + status from its current votes and save. */
+const recomputeEvent = async (event) => {
+  const tallies = await getTallies(event._id);
+  event.consensusScore = tallies.echoes - tallies.flags;
+  event.status = computeStatus(tallies.echoes, tallies.flags);
+  await event.save();
+  return tallies;
+};
+
 /**
- * Apply (or change) a user's vote on an event, adjust the trust-weighted
- * consensusScore by an exact delta, and promote/demote the status.
+ * Apply (or change) a user's vote on an event, then recompute the net score
+ * and majority status.
  *
  * @returns {Promise<{event: object, tallies: object}|null>} null if event missing.
  */
@@ -38,50 +42,35 @@ const applyVote = async ({ eventId, userId, voteType }) => {
   const event = await AcademicEvent.findById(eventId);
   if (!event) return null;
 
-  const weight = await getTrustWeight(userId);
   const existing = await ConsensusVote.findOne({ eventId, userId });
-
-  let delta = 0;
   if (existing) {
     if (existing.voteType !== voteType) {
-      // Reverse the old weighted vote, apply the new one.
-      delta = voteType * weight - existing.voteType * existing.weight;
       existing.voteType = voteType;
-      existing.weight = weight;
       await existing.save();
     }
-    // Same vote again => idempotent, no change.
+    // Same vote again => idempotent.
   } else {
-    delta = voteType * weight;
-    await ConsensusVote.create({ eventId, userId, voteType, weight });
+    await ConsensusVote.create({ eventId, userId, voteType, weight: 1 });
   }
 
-  if (delta !== 0) {
-    event.consensusScore = Number((event.consensusScore + delta).toFixed(2));
-    event.status = promoteStatus(event.consensusScore);
-    await event.save();
-  }
-
-  const tallies = await getTallies(eventId);
+  const tallies = await recomputeEvent(event);
   return { event, tallies };
 };
 
 /**
- * Seed an event's consensus with the creator's own (weighted) vouch.
- * A CR upload auto-verifies; a student upload starts pending until peers echo.
+ * Seed an event's consensus with the creator's own echo. A single upvote
+ * (and no flags) means echoes > flags, so a freshly-posted update is verified
+ * and reaches the calendar immediately — until peers flag it back down.
  * Mutates and saves the event; safe to call right after creation.
  */
 const seedCreatorConsensus = async (event, creatorUserId) => {
-  const weight = await getTrustWeight(creatorUserId);
   await ConsensusVote.create({
     eventId: event._id,
     userId: creatorUserId,
     voteType: 1,
-    weight,
+    weight: 1,
   });
-  event.consensusScore = weight;
-  event.status = promoteStatus(weight);
-  await event.save();
+  await recomputeEvent(event);
   return event;
 };
 
@@ -117,8 +106,8 @@ const findDuplicate = async ({ userId, nodeId, eventName, date, location }) => {
 
 /**
  * Create an event, or de-duplicate against an existing identical one:
- *  - new entry            -> create + seed the creator's vouch
- *  - duplicate, new voter  -> echo it (trust-weighted consensus goes UP)
+ *  - new entry            -> create + seed the creator's echo
+ *  - duplicate, new voter  -> echo it (consensus goes UP)
  *  - duplicate, same voter -> no change (idempotent)
  *
  * @returns {Promise<{event, status: 'created'|'merged'|'unchanged'}>}
@@ -151,8 +140,6 @@ module.exports = {
   applyVote,
   seedCreatorConsensus,
   upsertEvent,
-  promoteStatus,
+  computeStatus,
   getTallies,
-  VERIFY_THRESHOLD,
-  REJECT_THRESHOLD,
 };
