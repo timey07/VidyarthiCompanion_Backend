@@ -33,6 +33,7 @@ app.use('/api/v1/retrieval', protect, require('./modules/retrievalEngine/retriev
 app.use('/api/v1/transit', protect, require('./modules/transitEngine/transit.routes'));
 app.use('/api/v1/presence', protect, require('./modules/presenceEngine/presence.routes'));
 app.use('/api/v1/routine', protect, require('./modules/routineEngine/routine.routes'));
+app.use('/api/v1/profile', protect, require('./modules/profileEngine/profile.routes'));
 
 // --- Bootstrapper Function ---
 const bootstrapAlarms = async () => {

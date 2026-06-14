@@ -3,15 +3,12 @@ const Transaction = require('../../sharedModels/Transaction.model');
 const CampusMerchant = require('../../sharedModels/CampusMerchant.model');
 const CommunityNode = require('../../sharedModels/CommunityNode.model');
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
+const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
+const MessMenu = require('../../sharedModels/MessMenu.model');
 const { calculateAffordableMeals, daysRemainingInMonth, DEFAULT_NEARBY_OPTIONS } = require('./meal.service');
-const {
-  normalizeMerchantId,
-  prettyName,
-  inferCategory,
-  parseNotification,
-} = require('./merchant.service');
+const { normalizeMerchantId, prettyName, inferCategory } = require('./merchant.service');
+const gemini = require('../../core/gemini.service');
 
-const CRITICAL_BALANCE_RATIO = 0.1; // balance under 10% of monthly budget is critical
 const HIGH_SPEND_ABS = 500; // a single debit over this is "high spend"
 const SPEND_WINDOW_DAYS = 14; // window used to estimate baseline daily spend
 const VALID_CATEGORIES = [
@@ -26,6 +23,16 @@ const VALID_CATEGORIES = [
   'general',
 ];
 
+// Budget-friendly, protein-forward fuel options for gym-goers (INR).
+const PROTEIN_OPTIONS = [
+  { name: '2 boiled eggs + banana', cost: 40, protein: '~16g' },
+  { name: 'Sprouts chaat', cost: 45, protein: '~14g' },
+  { name: 'Peanut chikki + milk', cost: 55, protein: '~15g' },
+  { name: 'Soya chunks curry + rice', cost: 70, protein: '~22g' },
+  { name: 'Paneer bhurji roll', cost: 90, protein: '~20g' },
+  { name: 'Chana + curd bowl', cost: 60, protein: '~18g' },
+];
+
 /* --------------------------------- analytics -------------------------------- */
 
 const startOfMonth = () => {
@@ -36,13 +43,17 @@ const startOfMonth = () => {
 };
 
 /**
- * Compute the spend analytics that power the runway viz + category breakdown.
+ * Budget-first analytics. The primary metric is REMAINING BUDGET, computed as
+ * (effective budget) - (this month's spend), where the effective budget honours
+ * the user's optional "safe buffer" savings. Runway is remaining/avg-daily-spend.
  */
 const computeAnalytics = async (userId, user) => {
-  const balance = user.financialConfig.amazonPayBalance;
-  const monthlyBudget = user.financialConfig.monthlyBudget;
+  const fc = user.financialConfig;
+  const monthlyBudget = fc.monthlyBudget;
+  const safeBufferPct = fc.safeBufferPct || 0;
+  const effectiveBudget = Math.round(monthlyBudget * (1 - safeBufferPct / 100));
+  const balance = Number(fc.amazonPayBalance.toFixed(2)); // live wallet (reference)
   const daysLeft = daysRemainingInMonth();
-  const meal = calculateAffordableMeals(balance, daysLeft);
 
   const monthDebits = await Transaction.find({
     userId,
@@ -51,6 +62,8 @@ const computeAnalytics = async (userId, user) => {
   }).select('amount category');
 
   const spentThisMonth = monthDebits.reduce((s, t) => s + t.amount, 0);
+  const remainingBudget = Number((effectiveBudget - spentThisMonth).toFixed(2)); // may be negative
+  const remainingForRunway = Math.max(remainingBudget, 0);
 
   // Category breakdown for the month (crowdsourced tags).
   const byCat = new Map();
@@ -79,23 +92,29 @@ const computeAnalytics = async (userId, user) => {
   }).select('amount');
   const windowSpend = windowDebits.reduce((s, t) => s + t.amount, 0);
   const avgDailySpend = Number((windowSpend / SPEND_WINDOW_DAYS).toFixed(2));
-  const runwayDays = avgDailySpend > 0 ? Math.floor(balance / avgDailySpend) : null;
+  const runwayDays = avgDailySpend > 0 ? Math.floor(remainingForRunway / avgDailySpend) : null;
+  const onTrack = runwayDays == null || runwayDays >= daysLeft;
 
+  const meal = calculateAffordableMeals(remainingForRunway, daysLeft);
   const untaggedCount = await Transaction.countDocuments({ userId, category: 'unknown' });
 
   return {
-    balance: Number(balance.toFixed(2)),
+    balance,
     monthlyBudget,
-    currency: user.financialConfig.currency,
+    effectiveBudget,
+    safeBufferPct,
+    currency: fc.currency,
     daysLeftInMonth: daysLeft,
     spentThisMonth: Number(spentThisMonth.toFixed(2)),
-    remainingBudget: Number(Math.max(monthlyBudget - spentThisMonth, 0).toFixed(2)),
+    remainingBudget,
     avgDailySpend,
     runwayDays,
+    onTrack,
     dailyMealThreshold: meal.targetThreshold,
     maxAffordableMeal: meal.maxAllowableCost,
     affordableOptions: meal.affordableOptions,
-    isCritical: balance < monthlyBudget * CRITICAL_BALANCE_RATIO,
+    // "Critical" now means the BUDGET is nearly/already exhausted, not the wallet.
+    isCritical: remainingBudget <= effectiveBudget * 0.1,
     categoryBreakdown,
     untaggedCount,
   };
@@ -120,12 +139,10 @@ const txnDTO = (t) => ({
 
 /**
  * Ensure a CampusMerchant exists, bump its txn count, and resolve a category
- * using (in order): explicit tag > crowdsourced graph > note/text inference.
+ * using (in order): explicit user category > crowdsourced graph > AI/text hint.
  * Mutates the graph so the campus collaboratively maps new vendors.
- *
- * @returns {Promise<{category, merchant, resolvedBy}>}
  */
-const resolveAndLearnMerchant = async ({ merchantId, merchantRaw, note, explicitCategory }) => {
+const resolveAndLearnMerchant = async ({ merchantId, merchantRaw, note, explicitCategory, hintCategory }) => {
   let merchant = await CampusMerchant.findOne({ merchantId });
   if (!merchant) {
     merchant = await CampusMerchant.create({
@@ -138,36 +155,26 @@ const resolveAndLearnMerchant = async ({ merchantId, merchantRaw, note, explicit
   merchant.txnCount += 1;
   if (!merchant.displayName && merchantRaw) merchant.displayName = prettyName(merchantRaw);
 
+  const explicit = VALID_CATEGORIES.includes(explicitCategory) ? explicitCategory : null;
+  const hint = VALID_CATEGORIES.includes(hintCategory) ? hintCategory : null;
+
   let category = 'unknown';
-  let resolvedBy = 'none';
-
-  const explicit =
-    explicitCategory && VALID_CATEGORIES.includes(explicitCategory) ? explicitCategory : null;
-
   if (explicit) {
     category = explicit;
-    resolvedBy = 'explicit';
   } else if (merchant.category && merchant.category !== 'unknown') {
-    // Crowdsourced auto-resolution: someone already mapped this vendor.
-    category = merchant.category;
-    resolvedBy = 'graph';
+    category = merchant.category; // crowdsourced auto-resolution
   } else {
-    const inferred = inferCategory(merchantRaw, note, merchant.displayName);
-    if (inferred) {
-      category = inferred;
-      resolvedBy = 'inferred';
-    }
+    category = hint || inferCategory(merchantRaw, note, merchant.displayName) || 'unknown';
   }
 
-  // Grow the graph: if it was unknown and we just learned a category from this
-  // payment (explicit/note), persist it so other students auto-resolve later.
+  // Grow the graph so other students auto-resolve later.
   if (merchant.category === 'unknown' && category !== 'unknown') {
     merchant.category = category;
-    merchant.categorySource = 'auto';
+    merchant.categorySource = explicit ? 'user_tag' : 'auto';
   }
 
   await merchant.save();
-  return { category, merchant, resolvedBy };
+  return { category, merchant };
 };
 
 /* --------------------------------- summary ---------------------------------- */
@@ -212,16 +219,16 @@ exports.listTransactions = async (req, res) => {
 /* --------------------------------- ingest ----------------------------------- */
 
 // POST /api/v1/pocket/ingest   (also mounted at /webhook for back-compat)
-// Accepts EITHER a raw notification string { raw } OR structured fields
-// { merchant|vendor, amount, transactionType, category, note, source }.
+// Accepts EITHER a raw notification string { raw } (parsed by Gemini) OR
+// structured fields { merchant|vendor, amount, transactionType, category, note }.
 exports.ingestTransaction = async (req, res) => {
   try {
     const userId = req.user.userId;
     const body = req.body || {};
 
-    // 1. Parse raw notification text when provided; merge with structured fields.
+    // 1. Parse raw text with Gemini (falls back to the local parser if no key).
     let parsed = {};
-    if (body.raw) parsed = parseNotification(body.raw) || {};
+    if (body.raw) parsed = await gemini.parseTransaction(body.raw);
 
     const amount = Number(body.amount ?? parsed.amount);
     if (!amount || amount <= 0) {
@@ -230,7 +237,7 @@ exports.ingestTransaction = async (req, res) => {
         .json({ success: false, message: 'Could not read a valid amount from the payment.' });
     }
 
-    const merchantRaw = body.merchant || body.vendor || parsed.merchantRaw || 'Unknown merchant';
+    const merchantRaw = body.merchant || body.vendor || parsed.merchant || 'Unknown merchant';
     const note = body.note || parsed.note || null;
     const type = (body.transactionType || parsed.type) === 'credit' ? 'credit' : 'debit';
     const source = ['notification', 'sms', 'upi', 'amazon_pay', 'manual'].includes(body.source)
@@ -244,19 +251,19 @@ exports.ingestTransaction = async (req, res) => {
 
     // 2. Resolve + learn the merchant category (skip graph work for credits).
     const merchantId = normalizeMerchantId(merchantRaw);
-    let category = 'unknown';
+    let category = 'general';
     let merchantName = prettyName(merchantRaw);
+    let resolvedVia = parsed.via || (body.raw ? 'local' : 'manual');
     if (type === 'debit') {
       const resolved = await resolveAndLearnMerchant({
         merchantId,
         merchantRaw,
         note,
         explicitCategory: body.category,
+        hintCategory: parsed.inferredTag,
       });
       category = resolved.category;
       merchantName = resolved.merchant.displayName || merchantName;
-    } else {
-      category = 'general';
     }
 
     // 3. Apply to the live wallet balance.
@@ -285,7 +292,7 @@ exports.ingestTransaction = async (req, res) => {
     if (type === 'debit' && amount > HIGH_SPEND_ABS) {
       alert = `High spend: ₹${amount.toFixed(0)} at ${merchantName}.`;
     } else if (analytics.isCritical) {
-      alert = `Budget critical: ₹${analytics.balance.toFixed(0)} left for ${analytics.daysLeftInMonth} days.`;
+      alert = `Budget nearly spent: ₹${analytics.remainingBudget.toFixed(0)} left for ${analytics.daysLeftInMonth} days.`;
     }
 
     return res.status(201).json({
@@ -294,7 +301,7 @@ exports.ingestTransaction = async (req, res) => {
       data: {
         transaction: txnDTO(txn),
         needsTag: txn.category === 'unknown',
-        newBalance: analytics.balance,
+        parsedVia: resolvedVia,
         alert,
         summary: { ...analytics, recentTransactions: [] },
       },
@@ -308,8 +315,6 @@ exports.ingestTransaction = async (req, res) => {
 /* ----------------------------- crowdsourced tag ----------------------------- */
 
 // POST /api/v1/pocket/transactions/:id/tag   { category, displayName? }
-// Tags a transaction's merchant. This updates the GLOBAL merchant graph and
-// silently auto-categorizes every other student's untagged hit on that vendor.
 exports.tagTransaction = async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -323,7 +328,6 @@ exports.tagTransaction = async (req, res) => {
 
     const merchantId = txn.merchantId || normalizeMerchantId(txn.vendor);
 
-    // Authoritatively update the campus merchant graph.
     const merchant = await CampusMerchant.findOneAndUpdate(
       { merchantId },
       {
@@ -342,15 +346,12 @@ exports.tagTransaction = async (req, res) => {
       await merchant.save();
     }
 
-    // Update this transaction.
     txn.category = category;
     txn.merchantId = merchantId;
     if (displayName) txn.vendor = displayName.trim();
     else if (merchant.displayName) txn.vendor = merchant.displayName;
     await txn.save();
 
-    // Crowdsource backfill: auto-resolve every still-unknown hit on this vendor,
-    // for THIS user and everyone else on campus.
     const backfill = await Transaction.updateMany(
       { merchantId, category: 'unknown' },
       { $set: { category } }
@@ -369,16 +370,42 @@ exports.tagTransaction = async (req, res) => {
 
 /* ----------------------- wallet vs wellness recommendation ------------------ */
 
+/** Which meal slot is "current" by time of day. */
+const currentMealSlot = (d = new Date()) => {
+  const h = d.getHours();
+  if (h < 10) return 'breakfast';
+  if (h < 15) return 'lunch';
+  if (h < 19) return 'snacks';
+  return 'dinner';
+};
+
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** Today's dish for the current meal slot from a community menu. */
+const getTodaysDish = async (nodeId) => {
+  if (!nodeId) return null;
+  const menuDoc = await MessMenu.findOne({ nodeId });
+  if (!menuDoc) return null;
+  const today = DAY_NAMES[new Date().getDay()];
+  const meals = menuDoc.menu.get(today);
+  if (!meals) return null;
+  const slot = currentMealSlot();
+  const dish = meals[slot];
+  return dish ? { slot, dish } : null;
+};
+
 /**
- * Read the user's Mess "Accountability" communities and judge food quality from
- * the consensus on recent updates (rejected = downvoted = poor).
+ * Judge Mess food quality from the consensus on recent updates in the user's
+ * (preferred) Mess community. Net vote score > 0 = good, < 0 = poor.
  */
-const assessMessQuality = async (userId) => {
-  const messNodes = await CommunityNode.find({ members: userId, nodeType: 'Mess' }).select(
-    'nodeId name'
-  );
+const assessMessQuality = async (userId, preferredNodeId) => {
+  let messNodes = await CommunityNode.find({ members: userId, nodeType: 'Mess' }).select('nodeId name');
+  if (preferredNodeId) {
+    const only = messNodes.filter((n) => n.nodeId === preferredNodeId);
+    if (only.length) messNodes = only;
+  }
   if (messNodes.length === 0) {
-    return { quality: 'unknown', verified: 0, rejected: 0, nodeCount: 0, sample: null };
+    return { quality: 'unknown', netVotes: 0, echoes: 0, flags: 0, nodeCount: 0, sample: null, nodeId: null, nodeName: null };
   }
 
   const since = new Date();
@@ -392,56 +419,99 @@ const assessMessQuality = async (userId) => {
     .limit(50);
 
   if (events.length === 0) {
-    return { quality: 'unknown', verified: 0, rejected: 0, nodeCount: messNodes.length, sample: null };
+    return {
+      quality: 'unknown',
+      netVotes: 0,
+      echoes: 0,
+      flags: 0,
+      nodeCount: messNodes.length,
+      sample: null,
+      nodeId: messNodes[0].nodeId,
+      nodeName: messNodes[0].name,
+    };
   }
 
-  const rejected = events.filter((e) => e.status === 'rejected').length;
-  const verified = events.filter((e) => e.status === 'verified').length;
-  const worst = events[0]; // lowest consensusScore
-  const quality = rejected > verified && rejected > 0 ? 'poor' : 'ok';
+  const votes = await ConsensusVote.find({ eventId: { $in: events.map((e) => e._id) } }).select('voteType');
+  const echoes = votes.filter((v) => v.voteType === 1).length;
+  const flags = votes.filter((v) => v.voteType === -1).length;
+  const netVotes = echoes - flags;
+  const worst = events[0];
 
   return {
-    quality,
-    verified,
-    rejected,
+    quality: netVotes < 0 ? 'poor' : 'good',
+    netVotes,
+    echoes,
+    flags,
     nodeCount: messNodes.length,
     sample: worst ? { name: worst.eventName, consensusScore: worst.consensusScore } : null,
+    nodeId: messNodes[0].nodeId,
+    nodeName: messNodes[0].name,
   };
 };
 
-/**
- * Pick the most popular affordable cafe/restaurant from the crowdsourced graph,
- * pricing it from real transaction history. Falls back to the static list.
- */
-const pickCrowdsourcedSpot = async (ceiling) => {
+/** Most popular affordable cafe/restaurant picks, priced from real history. */
+const pickCrowdsourcedSpots = async (ceiling, limit = 2) => {
   const spots = await CampusMerchant.find({ category: { $in: ['cafe', 'restaurant'] } })
     .sort({ confirmations: -1, txnCount: -1 })
-    .limit(10);
+    .limit(12);
 
+  const picks = [];
   for (const spot of spots) {
     const agg = await Transaction.aggregate([
       { $match: { merchantId: spot.merchantId, type: 'debit' } },
-      { $group: { _id: null, avg: { $avg: '$amount' }, count: { $sum: 1 } } },
+      { $group: { _id: null, avg: { $avg: '$amount' } } },
     ]);
     const avgCost = agg[0]?.avg ? Math.round(agg[0].avg) : null;
     if (avgCost && avgCost <= ceiling) {
-      return {
+      picks.push({
         name: spot.displayName || 'Popular campus spot',
         category: spot.category,
         averageCost: avgCost,
         popularity: spot.txnCount,
         crowdsourced: true,
-      };
+      });
     }
+    if (picks.length >= limit) break;
   }
 
-  // Fallback: static nearby options (cafe/restaurant) within the ceiling.
-  const fallback = DEFAULT_NEARBY_OPTIONS.filter(
-    (o) => ['cafe', 'outside'].includes(o.category) && o.averageCost <= ceiling
-  ).sort((a, b) => a.averageCost - b.averageCost)[0];
-  return fallback
-    ? { name: fallback.name, category: 'cafe', averageCost: fallback.averageCost, crowdsourced: false }
-    : null;
+  if (picks.length === 0) {
+    DEFAULT_NEARBY_OPTIONS.filter((o) => ['cafe', 'outside'].includes(o.category) && o.averageCost <= ceiling)
+      .sort((a, b) => a.averageCost - b.averageCost)
+      .slice(0, limit)
+      .forEach((o) =>
+        picks.push({ name: o.name, category: 'cafe', averageCost: o.averageCost, crowdsourced: false })
+      );
+  }
+  return picks;
+};
+
+/** Cheapest tagged grocery/food merchant for budget-safe snacks. */
+const pickBudgetMerchant = async () => {
+  const spots = await CampusMerchant.find({ category: { $in: ['grocery', 'food'] } })
+    .sort({ txnCount: -1 })
+    .limit(10);
+  for (const spot of spots) {
+    const agg = await Transaction.aggregate([
+      { $match: { merchantId: spot.merchantId, type: 'debit' } },
+      { $group: { _id: null, avg: { $avg: '$amount' } } },
+    ]);
+    const avgCost = agg[0]?.avg ? Math.round(agg[0].avg) : null;
+    if (avgCost) return { name: spot.displayName, category: spot.category, averageCost: avgCost };
+  }
+  return null;
+};
+
+/** Budget-aware protein tip for gym-goers. */
+const buildGymFuel = (ceiling) => {
+  const affordable = PROTEIN_OPTIONS.filter((o) => o.cost <= Math.max(ceiling, 45)).slice(0, 2);
+  const picks = affordable.length ? affordable : PROTEIN_OPTIONS.slice(0, 1);
+  return {
+    title: 'Gym day fuel',
+    message: `Hit your protein under budget: ${picks
+      .map((p) => `${p.name} (~₹${p.cost}, ${p.protein})`)
+      .join(' or ')}.`,
+    options: picks,
+  };
 };
 
 // GET /api/v1/pocket/recommendation
@@ -452,36 +522,59 @@ exports.getRecommendation = async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
     const analytics = await computeAnalytics(userId, user);
-    const mess = await assessMessQuality(userId);
+    const mess = await assessMessQuality(userId, user.primaryMessNodeId);
+    const todaysDish = await getTodaysDish(mess.nodeId);
+    mess.todaysDish = todaysDish;
 
-    const balance = analytics.balance;
-    const treatCeiling = Math.min(balance, Math.max(analytics.maxAffordableMeal, 200));
-    const budgetHealthy = !analytics.isCritical && balance >= analytics.maxAffordableMeal;
+    const remaining = analytics.remainingBudget;
+    const treatCeiling = Math.max(analytics.maxAffordableMeal, 200);
+    const budgetHealthy = !analytics.isCritical && remaining >= analytics.maxAffordableMeal;
+    const dishLabel = todaysDish ? `Today's ${todaysDish.slot} (${todaysDish.dish})` : 'Mess food';
 
     let scenario = 'neutral';
-    let title = 'Mess looks fine today';
-    let message = 'No strong downvotes on your Mess community right now — the mess is a safe bet.';
-    let suggestion = null;
+    let title = 'Connect your Mess community';
+    let message =
+      'Set a primary Mess community in your Profile so PocketBuddy can warn you on bad-food days and suggest wallet-safe alternatives.';
+    let suggestions = [];
 
-    if (mess.quality === 'unknown') {
-      scenario = 'neutral';
-      title = 'Connect your Mess community';
-      message =
-        'Join your hostel/mess community so PocketBuddy can warn you on bad-food days and suggest wallet-safe alternatives.';
+    if (mess.quality === 'unknown' && mess.nodeCount > 0) {
+      // Member but no recent votes yet.
+      scenario = 'eat_in';
+      title = 'No mess verdict yet today';
+      message = `No votes on ${mess.nodeName} yet. Eat in to preserve your ₹${Math.max(remaining, 0).toFixed(0)} budget — vote after your meal to help the community.`;
+    } else if (mess.quality === 'good') {
+      // State A: food is good -> passive wellness card.
+      scenario = 'eat_in';
+      title = `${dishLabel} is rated well today`;
+      message = `${dishLabel} is rated well (+${mess.netVotes} net votes). Eat in to preserve your ₹${Math.max(remaining, 0).toFixed(0)} budget runway.`;
     } else if (mess.quality === 'poor') {
       if (budgetHealthy) {
-        suggestion = await pickCrowdsourcedSpot(treatCeiling);
+        // State B: food bad + healthy budget -> recommendation engine.
+        suggestions = await pickCrowdsourcedSpots(treatCeiling, 2);
         scenario = 'treat';
-        title = 'Mess food is rated poorly today';
-        message = suggestion
-          ? `You have ₹${balance.toFixed(0)} in your wallet. Treat yourself to ${suggestion.name} (~₹${suggestion.averageCost}) — a campus favourite.`
-          : `You have ₹${balance.toFixed(0)} to spare. A cafe run is well within budget today.`;
+        title = `${dishLabel} is flagged as poor today`;
+        message = suggestions.length
+          ? `${dishLabel} is flagged (${mess.netVotes} net votes). You have ₹${remaining.toFixed(0)} — based on campus spending we recommend ${suggestions
+              .map((s) => `${s.name} (~₹${s.averageCost})`)
+              .join(' or ')}.`
+          : `${dishLabel} is flagged (${mess.netVotes} net votes). You have ₹${remaining.toFixed(0)} — a cafe run is well within budget today.`;
       } else {
+        // State C: food bad + budget low -> budget-safe alternative.
+        const budgetMerchant = await pickBudgetMerchant();
         scenario = 'conserve';
-        title = 'Mess isn’t great, but budget is tight';
-        message = `Only ₹${balance.toFixed(0)} left for ${analytics.daysLeftInMonth} days. Skip eating out — make Maggi in the dorm, or catch free snacks at a club meetup.`;
+        title = `${dishLabel} is flagged, but budget is tight`;
+        message = budgetMerchant
+          ? `Only ₹${Math.max(remaining, 0).toFixed(0)} left for ${analytics.daysLeftInMonth} days. Skip eating out — grab a budget snack from ${budgetMerchant.name} (~₹${budgetMerchant.averageCost}) or check the Campus Freebies community.`
+          : `Only ₹${Math.max(remaining, 0).toFixed(0)} left for ${analytics.daysLeftInMonth} days. Skip eating out — make Maggi in the dorm or check the Campus Freebies community.`;
       }
     }
+
+    // Gym fuel tip if the user belongs to / picked a Gym community.
+    let gymFuel = null;
+    const gymNode = user.primaryGymNodeId
+      ? await CommunityNode.findOne({ nodeId: user.primaryGymNodeId, members: userId })
+      : await CommunityNode.findOne({ members: userId, nodeType: 'Gym' });
+    if (gymNode) gymFuel = buildGymFuel(analytics.maxAffordableMeal);
 
     return res.status(200).json({
       success: true,
@@ -489,13 +582,14 @@ exports.getRecommendation = async (req, res) => {
         scenario,
         title,
         message,
-        suggestion,
+        suggestions,
         budgetHealthy,
-        balance,
-        remainingBudget: analytics.remainingBudget,
+        remainingBudget: remaining,
         runwayDays: analytics.runwayDays,
+        onTrack: analytics.onTrack,
         daysLeftInMonth: analytics.daysLeftInMonth,
         mess,
+        gymFuel,
       },
     });
   } catch (error) {
@@ -512,13 +606,16 @@ exports.getMealPlan = async (req, res) => {
     const user = await User.findOne({ userId: req.user.userId });
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    const { amazonPayBalance, currency } = user.financialConfig;
-    const daysLeft = daysRemainingInMonth();
-    const meal = calculateAffordableMeals(amazonPayBalance, daysLeft);
-
+    const analytics = await computeAnalytics(req.user.userId, user);
     return res.status(200).json({
       success: true,
-      data: { currency, daysLeftInMonth: daysLeft, ...meal },
+      data: {
+        currency: analytics.currency,
+        daysLeftInMonth: analytics.daysLeftInMonth,
+        targetThreshold: analytics.dailyMealThreshold,
+        maxAllowableCost: analytics.maxAffordableMeal,
+        affordableOptions: analytics.affordableOptions,
+      },
     });
   } catch (error) {
     console.error('PocketBuddy Meal Plan Error:', error);
