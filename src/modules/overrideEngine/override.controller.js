@@ -10,7 +10,7 @@ exports.verifyOverride = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing userId or image data' });
     }
 
-    const extractedData = await bedrockService.processImageWithBedrock(imageString);
+    const extractedData = await bedrockService.extractEventFromImage(imageString);
 
     if (!extractedData || !extractedData.events || !Array.isArray(extractedData.events)) {
       return res.status(500).json({ success: false, message: "Invalid data format from AI" });
