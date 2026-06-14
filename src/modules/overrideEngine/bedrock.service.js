@@ -1,10 +1,9 @@
-import dotenv from 'dotenv';
-dotenv.config();
+require('dotenv').config();
 
 /**
  * Extracts all event details from a base64 image string using Gemini 2.5 Flash.
  */
-export const extractEventFromImage = async (base64String) => {
+const extractEventFromImage = async (base64String) => {
   try {
     if (!process.env.GEMINI_API_KEY) {
       throw new Error("Missing GEMINI_API_KEY in process.env!");
@@ -61,4 +60,10 @@ export const extractEventFromImage = async (base64String) => {
     console.error("Gemini OCR Processing Error:", error);
     throw error;
   }
+};
+
+module.exports = {
+  extractEventFromImage,
+  // Backwards-compatible alias for the original controller call name.
+  processImageWithBedrock: extractEventFromImage,
 };
