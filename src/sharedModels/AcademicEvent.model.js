@@ -22,10 +22,17 @@ const academicEventSchema = new mongoose.Schema({
     type: Number, 
     required: true 
   },
+  // Trust-weighted community consensus. Drives the verification lifecycle:
+  // seeded with the creator's trustScore, then moved by community votes.
+  consensusScore: {
+    type: Number,
+    default: 0,
+    index: true,
+  },
   status: { 
     type: String, 
     enum: ['verified', 'pending', 'rejected'], 
-    default: 'verified' 
+    default: 'pending' 
   },
   source: { 
     type: String, 

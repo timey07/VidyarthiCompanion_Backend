@@ -1,6 +1,7 @@
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const bedrockService = require('./bedrock.service');
 const alertScheduler = require('../../core/alertScheduler');
+const consensusService = require('../communityEngine/consensus.service');
 
 exports.verifyOverride = async (req, res) => {
   try {
@@ -66,15 +67,18 @@ exports.verifyOverride = async (req, res) => {
         continue;
       }
 
-      // 5. Database Save
+      // 5. Database Save (starts 'pending'; consensus decides verification)
       const newEvent = await AcademicEvent.create({
         userId,
         eventName: event.eventName || "Untitled Event",
         date: eventDate, 
         location: event.location || "TBD",
         confidenceScore: event.confidenceScore || 0.5,
-        status: 'verified'
       });
+
+      // Seed the creator's trust-weighted vouch: a CR auto-verifies, a student
+      // upload stays pending until peers echo it.
+      await consensusService.seedCreatorConsensus(newEvent, userId);
 
       alertScheduler.scheduleEventAlert(newEvent);
       savedEvents.push(newEvent);
