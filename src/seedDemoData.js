@@ -55,6 +55,22 @@ const LOGS = [
     }
     await User.updateMany({ userId: { $in: MEMBERS } }, { $addToSet: { communityNodeIds: NODE_ID } });
 
+    // 1b. Logistical node (carpool circle) — powers the carpool synergy.
+    const CARPOOL_ID = 'carpool-circle';
+    const CARPOOL_MEMBERS = ['student_isha', 'student_rohan'];
+    if (!(await CommunityNode.findOne({ nodeId: CARPOOL_ID }))) {
+      await CommunityNode.create({
+        nodeId: CARPOOL_ID,
+        name: 'Hostel Carpool Circle',
+        nodeType: 'Logistical',
+        crUserId: null,
+        members: CARPOOL_MEMBERS,
+        nodeRules: { privacy: 'open' },
+      });
+      console.log('[seed-demo] created Logistical node Hostel Carpool Circle.');
+    }
+    await User.updateMany({ userId: { $in: CARPOOL_MEMBERS } }, { $addToSet: { communityNodeIds: CARPOOL_ID } });
+
     // 2. Schedule events.
     const existing = await AcademicEvent.countDocuments({ nodeId: NODE_ID });
     if (existing > 0) {

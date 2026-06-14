@@ -1,32 +1,72 @@
+const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
+const { getUserNodeIds } = require('../communityEngine/node.controller');
+const { estimateTransit } = require('./transit.service');
+
+const fmtMins = (m) => (m <= 0 ? 'Leave now' : `${m} min`);
+
+// POST /api/v1/transit/calculate
+// Real calc: finds the user's next event and derives a departure time from the
+// time-until-event minus an estimated travel time.
 exports.calculateDeparture = async (req, res) => {
   try {
-    const { eventId, currentLocation } = req.body;
+    const userId = req.user.userId;
+    const { currentLocation } = req.body;
+    const now = new Date();
 
-    if (!eventId || !currentLocation) {
-      return res.status(400).json({ success: false, message: 'Missing eventId or currentLocation' });
+    // Next upcoming event (own + node-shared, not rejected).
+    const myNodeIds = await getUserNodeIds(userId);
+    const nextEvent = await AcademicEvent.findOne({
+      $or: [{ userId }, { nodeId: { $in: myNodeIds } }],
+      date: { $gte: now },
+      status: { $ne: 'rejected' },
+    }).sort({ date: 1 });
+
+    if (!nextEvent) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          status: 'none',
+          title: 'No upcoming events',
+          message: "You're all caught up. Enjoy the free time.",
+        },
+      });
     }
 
-    console.log(`Calculating transit from ${currentLocation} for event ${eventId}`);
+    const { transitMode, travelMinutes, distanceKm } = estimateTransit(
+      currentLocation,
+      nextEvent.location
+    );
 
-    // Mocking the transit calculation logic
-    // In a real app, you would query the AcademicEvent model for the event time,
-    // then query Google Maps API for the travel time from currentLocation.
+    const minutesUntil = Math.round((nextEvent.date.getTime() - now.getTime()) / 60000);
+    const leaveInMinutes = minutesUntil - travelMinutes;
 
-    res.status(200).json({
-      success: true,
-      data: {
-        title: "Project Sync & Dinner",
-        location: "SG Highway Cafe",
-        time: "8:00 PM",
-        transitMode: "Auto Rickshaw",
-        estTravelTime: "35 mins",
-        leaveIn: "25 mins",
-        status: "warning"
-      }
+    // Urgency: already late/now -> critical, within 15 min -> warning, else safe.
+    let status = 'safe';
+    if (leaveInMinutes <= 0) status = 'critical';
+    else if (leaveInMinutes <= 15) status = 'warning';
+
+    const timeIST = nextEvent.date.toLocaleTimeString('en-IN', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZone: 'Asia/Kolkata',
     });
 
+    return res.status(200).json({
+      success: true,
+      data: {
+        status,
+        title: nextEvent.eventName,
+        location: nextEvent.location,
+        time: timeIST,
+        transitMode,
+        estTravelTime: `${travelMinutes} min`,
+        leaveIn: fmtMins(leaveInMinutes),
+        minutesUntil,
+        distanceKm,
+      },
+    });
   } catch (error) {
     console.error('Transit Calculation Error:', error);
-    res.status(500).json({ success: false, message: 'Server error calculating transit' });
+    return res.status(500).json({ success: false, message: 'Server error calculating transit' });
   }
 };
