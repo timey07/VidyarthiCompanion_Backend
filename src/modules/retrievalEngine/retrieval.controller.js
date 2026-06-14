@@ -1,5 +1,10 @@
-const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 require('dotenv').config();
+const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
+const User = require('../../sharedModels/User.model');
+const CommunityAlert = require('../../sharedModels/CommunityAlert.model');
+const { calculateBurnoutScore } = require('../empathyMesh/safeSkip.service');
+const { calculateAffordableMeals, daysRemainingInMonth } = require('../pocketBuddy/meal.service');
+const { getUserNodeIds } = require('../communityEngine/node.controller');
 
 exports.askCampusFlow = async (req, res) => {
   try {
@@ -12,53 +17,89 @@ exports.askCampusFlow = async (req, res) => {
 
     console.log(`User ${userId} asked: "${query}"`);
 
-    // 1. Fetch the user's real context from the database
-    const userEvents = await AcademicEvent.find({ userId }).sort({ date: 1 }).limit(3);
-    const contextString = userEvents.length > 0 
-      ? JSON.stringify(userEvents) 
-      : "No upcoming events found in the schedule.";
+    // --- Gather the full ground-truth context (schedule + budget + wellbeing + mess) ---
+    const myNodeIds = await getUserNodeIds(userId);
+    const now = new Date();
 
-    // 2. Build the System Prompt
-// 2. Build the System Prompt
-    const systemPrompt = `You are CampusFlow, an intelligent and helpful college OS assistant. 
-    The student has asked: "${query}"
-    
-    Here is their actual upcoming schedule context from the database (Note: These timestamps are in UTC):
-    ${contextString}
+    const [user, events, burnout, messAlerts] = await Promise.all([
+      User.findOne({ userId }),
+      AcademicEvent.find({
+        $or: [{ userId }, { nodeId: { $in: myNodeIds } }],
+        date: { $gte: now },
+        status: { $ne: 'rejected' },
+      })
+        .sort({ date: 1 })
+        .limit(5),
+      calculateBurnoutScore(userId),
+      CommunityAlert.find({ status: 'active', nodeType: /mess/i }).sort({ updatedAt: -1 }).limit(3),
+    ]);
 
-    IMPORTANT TIMEZONE RULE: The user is in the India Standard Time (IST) timezone. You MUST convert all UTC times from the database context into IST (UTC +5:30) before presenting them to the user.
+    let wallet = null;
+    if (user) {
+      const { amazonPayBalance, monthlyBudget, currency } = user.financialConfig;
+      const daysLeft = daysRemainingInMonth();
+      const meal = calculateAffordableMeals(amazonPayBalance, daysLeft);
+      wallet = {
+        balance: Number(amazonPayBalance.toFixed(2)),
+        currency,
+        monthlyBudget,
+        daysLeftInMonth: daysLeft,
+        perMealThreshold: meal.targetThreshold,
+        affordableOptions: meal.affordableOptions.map((o) => `${o.name} (₹${o.averageCost})`),
+      };
+    }
 
-    Answer the student's question directly, briefly, and conversationally based ONLY on the context provided. 
-    If the schedule is empty, gently tell them to upload a syllabus using the Override Engine.
-    Keep the response under 3 sentences.`;
+    const context = {
+      upcomingEvents: events.map((e) => ({
+        eventName: e.eventName,
+        dateUTC: e.date,
+        location: e.location,
+        status: e.status,
+      })),
+      wallet,
+      wellbeing: { burnoutScore: burnout.burnoutScore, recommendSkip: burnout.recommendSkip },
+      messStatus: messAlerts.map((a) => ({
+        message: a.message,
+        echoes: a.upvotes,
+        flags: a.downvotes,
+      })),
+    };
 
-    // 3. Use the proven gemini-2.5-flash endpoint via native fetch
+    // --- Build the grounded prompt ---
+    const systemPrompt = `You are CampusFlow, an intelligent, helpful college life + finance assistant for a student in India.
+The student asked: "${query}"
+
+Here is their LIVE context as JSON (use ONLY this; do not invent facts):
+${JSON.stringify(context)}
+
+RULES:
+- Timezone: all dateUTC values are UTC. The student is in IST (UTC +5:30); convert before stating any time.
+- Money: the currency is Indian Rupees (₹). Quote amounts in ₹.
+- Schedule questions: answer from upcomingEvents.
+- Budget/food questions: use wallet (balance, perMealThreshold, affordableOptions). If the mess is flagged in messStatus and the budget allows, you may suggest an affordable outside option; otherwise recommend the mess.
+- Wellbeing questions: use wellbeing. If recommendSkip is true, gently mention a Safe-Skip is available.
+- If the relevant context is empty, say so briefly and suggest the right action (e.g., upload a timetable via the Override Engine).
+- Be direct and conversational. Keep the response under 3 sentences.`;
+
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{
-          parts: [{ text: systemPrompt }]
-        }],
-        generationConfig: { temperature: 0.7 } // Slightly higher temp for conversational tone
-      })
+        contents: [{ parts: [{ text: systemPrompt }] }],
+        generationConfig: { temperature: 0.6 },
+      }),
     });
 
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error?.message || "Gemini API Request Failed");
+      throw new Error(data.error?.message || 'Gemini API Request Failed');
     }
 
     const answer = data.candidates[0].content.parts[0].text.trim();
 
-    // 4. Send the AI response back to User 1
-    res.status(200).json({
-      success: true,
-      data: { answer }
-    });
-
+    res.status(200).json({ success: true, data: { answer } });
   } catch (error) {
     console.error('Retrieval Engine Error:', error);
     res.status(500).json({ success: false, message: 'Server error querying CampusFlow AI' });
