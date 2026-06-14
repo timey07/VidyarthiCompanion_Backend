@@ -25,7 +25,7 @@ exports.processImageWithBedrock = async (base64String) => {
     }`;
 
     // Using User 3's specific 2.5-flash model via raw fetch
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
     const response = await fetch(url, {
       method: "POST",
