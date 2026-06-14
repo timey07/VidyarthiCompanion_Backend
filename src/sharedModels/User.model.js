@@ -56,10 +56,16 @@ const userSchema = new mongoose.Schema(
     },
     // India-centric financial profile (PocketBuddy x Amazon Pay).
     financialConfig: {
-      monthlyBudget: { type: Number, default: 8000 }, // INR
-      amazonPayBalance: { type: Number, default: 2000 }, // INR
+      monthlyBudget: { type: Number, default: 8000 }, // INR hard ceiling
+      amazonPayBalance: { type: Number, default: 2000 }, // INR live wallet balance
       currency: { type: String, default: 'INR' },
+      // % of the monthly budget the AI "hides" to force savings (0-50).
+      safeBufferPct: { type: Number, default: 0, min: 0, max: 50 },
     },
+    // The user's chosen primary Mess community (for Wallet-vs-Wellness nudges).
+    primaryMessNodeId: { type: String, default: null },
+    // The user's chosen primary Gym community (for fuel/protein nudges).
+    primaryGymNodeId: { type: String, default: null },
     // Personalisation thresholds for the Empathy Mesh / routine engine.
     wellnessThresholds: {
       minSleepHours: { type: Number, default: 6 },
@@ -86,6 +92,8 @@ userSchema.methods.toPublicJSON = function () {
     trustScore: this.trustScore,
     communityNodeIds: this.communityNodeIds,
     financialConfig: this.financialConfig,
+    primaryMessNodeId: this.primaryMessNodeId,
+    primaryGymNodeId: this.primaryGymNodeId,
     wellnessThresholds: this.wellnessThresholds,
     neurodivergentTags: this.neurodivergentTags,
   };
