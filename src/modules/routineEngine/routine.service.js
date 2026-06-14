@@ -41,9 +41,10 @@ const assembleDailyPlan = async (userId) => {
 
   const [user, events, burnout] = await Promise.all([
     User.findOne({ userId }),
+    // Only FUTURE events (passed events are dropped from Today's Plan).
     AcademicEvent.find({
       $or: [{ userId }, { nodeId: { $in: myNodeIds } }],
-      date: { $gte: start, $lte: horizon },
+      date: { $gte: now, $lte: horizon },
       status: { $ne: 'rejected' },
     }).sort({ date: 1 }),
     calculateBurnoutScore(userId),
@@ -116,6 +117,32 @@ const assembleDailyPlan = async (userId) => {
     (a, b) => b.priority - a.priority || new Date(a.date || 0) - new Date(b.date || 0)
   );
 
+  // Immediate upcoming event (events are already sorted ascending + future-only).
+  const hoursUntil = (d) => Math.round(((new Date(d).getTime() - now.getTime()) / 3600000) * 10) / 10;
+  const nextEv = events[0] || null;
+  const nextEvent = nextEv
+    ? {
+        id: nextEv._id.toString(),
+        title: nextEv.eventName,
+        date: nextEv.date,
+        location: nextEv.location,
+        hoursUntil: hoursUntil(nextEv.date),
+      }
+    : null;
+
+  // Nearest upcoming deadline/exam (so no deadline is missed).
+  const deadlineEv = events.find((e) => ['exam', 'deadline'].includes(classifyEvent(e.eventName).type));
+  const nextDeadline = deadlineEv
+    ? {
+        id: deadlineEv._id.toString(),
+        title: deadlineEv.eventName,
+        date: deadlineEv.date,
+        location: deadlineEv.location,
+        type: classifyEvent(deadlineEv.eventName).type,
+        hoursUntil: hoursUntil(deadlineEv.date),
+      }
+    : null;
+
   return {
     date: now,
     summary: {
@@ -127,6 +154,8 @@ const assembleDailyPlan = async (userId) => {
       currency: wallet?.currency ?? 'INR',
       isBudgetCritical: wallet?.isCritical ?? false,
     },
+    nextEvent,
+    nextDeadline,
     cards,
   };
 };
