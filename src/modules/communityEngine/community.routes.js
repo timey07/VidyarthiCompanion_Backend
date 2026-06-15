@@ -15,6 +15,7 @@ const {
   updateBaseline,
   getNodeBaseline,
   adoptNodeBaseline,
+  getMeetupSlots,
 } = require('./node.controller');
 const { getMessVotes, castMessVote } = require('./messVote.controller');
 
@@ -36,6 +37,9 @@ router.post('/nodes/:nodeId/approve', approveRequest);
 router.post('/nodes/:nodeId/admins', promoteMember);
 router.get('/nodes/:nodeId/members', listNodeMembers);
 router.get('/nodes/:nodeId/feed', getNodeFeed);
+
+// Empathy Mesh: find a shared free slot to meet a fellow member.
+router.get('/nodes/:nodeId/meetup/:memberId', getMeetupSlots);
 
 // Admin-only: update the community's baseline timetable (Academic) or menu (Mess).
 router.put('/nodes/:nodeId/baseline', updateBaseline);

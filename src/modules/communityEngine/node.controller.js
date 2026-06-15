@@ -4,6 +4,7 @@ const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
 const User = require('../../sharedModels/User.model');
 const BaselineRoutine = require('../../sharedModels/BaselineRoutine.model');
 const MessMenu = require('../../sharedModels/MessMenu.model');
+const { findMeetupSlots } = require('../empathyMesh/meetup.service');
 
 /** Build a stable, unique-ish nodeId slug from a name. */
 const buildNodeId = (name) => {
@@ -684,6 +685,42 @@ exports.listNodeMembers = async (req, res) => {
   } catch (error) {
     console.error('List Node Members Error:', error);
     return res.status(500).json({ success: false, message: 'Server error listing members.' });
+  }
+};
+
+// GET /api/v1/community/nodes/:nodeId/meetup/:memberId
+// Empathy Mesh "Meet Up": find shared free slots (08:00–23:00) over the next 3
+// days between the requester and a fellow member, so a friend can reach out to
+// a struggling member. Both must belong to the (wellbeing) community.
+exports.getMeetupSlots = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { nodeId, memberId } = req.params;
+    const node = await CommunityNode.findOne({ nodeId });
+    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
+    if (!node.members.includes(userId)) {
+      return res.status(403).json({ success: false, message: 'Join this community first.' });
+    }
+    if (!node.members.includes(memberId) || memberId === userId) {
+      return res.status(400).json({ success: false, message: 'Pick another member of this community.' });
+    }
+
+    const [slots, member] = await Promise.all([
+      findMeetupSlots(userId, memberId),
+      User.findOne({ userId: memberId }).select('userId name'),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        member: member ? { userId: member.userId, name: member.name } : { userId: memberId, name: memberId },
+        slots,
+        windowDays: 3,
+      },
+    });
+  } catch (error) {
+    console.error('Meet Up Slots Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error finding a meet-up slot.' });
   }
 };
 

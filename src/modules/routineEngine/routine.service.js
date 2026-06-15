@@ -1,5 +1,6 @@
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const User = require('../../sharedModels/User.model');
+const CommunityNode = require('../../sharedModels/CommunityNode.model');
 const { calculateBurnoutScore } = require('../empathyMesh/safeSkip.service');
 const { calculateAffordableMeals, daysRemainingInMonth } = require('../pocketBuddy/meal.service');
 const { getUserNodeIds } = require('../communityEngine/node.controller');
@@ -23,6 +24,58 @@ const classifyEvent = (name = '') => {
     if (rule.re.test(name)) return { type: rule.type, priority: rule.priority };
   }
   return { type: 'class', priority: 50 };
+};
+
+/**
+ * Empathy Mesh cross-member alerts: if a fellow member of any of the user's
+ * wellbeing (Empathy) communities has a HIGH burnout score, surface a gentle
+ * "reach out" card in THIS user's Today's Plan so the circle can support them.
+ */
+const buildEmpathyAlerts = async (userId) => {
+  const empathyNodes = await CommunityNode.find({
+    members: userId,
+    $or: [{ nature: 'wellbeing' }, { nodeType: 'Empathy' }],
+  }).select('nodeId name members');
+
+  if (!empathyNodes.length) return [];
+
+  // Unique fellow members across all the user's empathy circles.
+  const peers = new Map(); // memberId -> { nodeId, nodeName }
+  for (const node of empathyNodes) {
+    for (const memberId of node.members) {
+      if (memberId !== userId && !peers.has(memberId)) {
+        peers.set(memberId, { nodeId: node.nodeId, nodeName: node.name });
+      }
+    }
+  }
+  if (!peers.size) return [];
+
+  const peerIds = [...peers.keys()];
+  const [scores, users] = await Promise.all([
+    Promise.all(peerIds.map((id) => calculateBurnoutScore(id).catch(() => null))),
+    User.find({ userId: { $in: peerIds } }).select('userId name'),
+  ]);
+  const nameOf = new Map(users.map((u) => [u.userId, u.name]));
+
+  const cards = [];
+  peerIds.forEach((memberId, i) => {
+    const score = scores[i];
+    if (!score || !score.recommendSkip) return; // only HIGH-burnout members
+    const ctx = peers.get(memberId);
+    const name = nameOf.get(memberId) || 'A member';
+    cards.push({
+      id: `empathy-alert-${memberId}`,
+      kind: 'wellbeing',
+      type: 'empathy_alert',
+      priority: 88, // below the user's own Safe-Skip (92), above budget
+      title: `${name} may be struggling (burnout ${score.burnoutScore}/10)`,
+      note: `In your Empathy Mesh "${ctx.nodeName}". Consider a Meet Up to check in.`,
+      action: 'meet_up',
+      nodeId: ctx.nodeId,
+      memberId,
+    });
+  });
+  return cards;
 };
 
 /**
@@ -112,6 +165,10 @@ const assembleDailyPlan = async (userId) => {
       action: 'view_meals',
     });
   }
+
+  // 4. Empathy Mesh — fellow members in distress (reach-out cards).
+  const empathyAlerts = await buildEmpathyAlerts(userId);
+  for (const alert of empathyAlerts) cards.push(alert);
 
   // Highest priority first; for ties, the sooner item wins.
   cards.sort(
