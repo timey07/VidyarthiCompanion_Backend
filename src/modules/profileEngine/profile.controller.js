@@ -50,9 +50,10 @@ exports.getProfile = async (req, res) => {
     const user = await User.findOne({ userId });
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    const [messCommunities, gymCommunities, routine] = await Promise.all([
+    const [messCommunities, gymCommunities, classCommunities, routine] = await Promise.all([
       listUserNodesByType(userId, 'Mess'),
       listUserNodesByType(userId, 'Gym'),
+      listUserNodesByType(userId, 'Academic'),
       BaselineRoutine.findOne({ userId }),
     ]);
 
@@ -74,8 +75,10 @@ exports.getProfile = async (req, res) => {
         },
         primaryMessNodeId: user.primaryMessNodeId || null,
         primaryGymNodeId: user.primaryGymNodeId || null,
+        primaryClassNodeId: user.primaryClassNodeId || null,
         messCommunities,
         gymCommunities,
+        classCommunities,
         schedule: routine ? routine.slots : [],
         menu: menuToObject(menuDoc),
         personalMenu: messMapToObject(user.personalMessMenu),
@@ -95,7 +98,7 @@ exports.updateFinancial = async (req, res) => {
     const user = await User.findOne({ userId });
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    const { monthlyBudget, safeBufferPct, primaryMessNodeId, primaryGymNodeId } = req.body;
+    const { monthlyBudget, safeBufferPct, primaryMessNodeId, primaryGymNodeId, primaryClassNodeId } = req.body;
 
     if (monthlyBudget != null) {
       const v = Number(monthlyBudget);
@@ -124,6 +127,12 @@ exports.updateFinancial = async (req, res) => {
       }
       user.primaryGymNodeId = primaryGymNodeId || null;
     }
+    if (primaryClassNodeId !== undefined) {
+      if (primaryClassNodeId && !user.communityNodeIds.includes(primaryClassNodeId)) {
+        return res.status(400).json({ success: false, message: 'Join that Class community first.' });
+      }
+      user.primaryClassNodeId = primaryClassNodeId || null;
+    }
 
     await user.save();
     return res.status(200).json({
@@ -134,6 +143,7 @@ exports.updateFinancial = async (req, res) => {
         safeBufferPct: user.financialConfig.safeBufferPct,
         primaryMessNodeId: user.primaryMessNodeId,
         primaryGymNodeId: user.primaryGymNodeId,
+        primaryClassNodeId: user.primaryClassNodeId,
       },
     });
   } catch (error) {

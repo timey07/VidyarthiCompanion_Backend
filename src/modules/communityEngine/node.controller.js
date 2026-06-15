@@ -20,6 +20,44 @@ const buildNodeId = (name) => {
 const buildInviteCode = () =>
   `FLOW-${Math.random().toString(36).toUpperCase().slice(2, 7)}`;
 
+const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const MESS_MEALS = ['breakfast', 'lunch', 'snacks', 'dinner'];
+
+/** Sanitize an incoming timetable into clean baseline slots. */
+const cleanSchedule = (slots) =>
+  (Array.isArray(slots) ? slots : [])
+    .filter((s) => s && s.subject && DAYS.includes(s.day))
+    .map((s) => ({
+      day: s.day,
+      subject: String(s.subject).trim(),
+      timeStart: s.timeStart || null,
+      timeEnd: s.timeEnd || null,
+      room: s.room || null,
+    }));
+
+/** Sanitize an incoming weekly menu (day -> {meal: dish}). */
+const cleanMenu = (menu) => {
+  const out = {};
+  if (menu && typeof menu === 'object') {
+    for (const day of DAYS) {
+      const m = menu[day];
+      if (m) {
+        out[day] = {
+          breakfast: m.breakfast || '',
+          lunch: m.lunch || '',
+          snacks: m.snacks || '',
+          dinner: m.dinner || '',
+        };
+      }
+    }
+  }
+  return out;
+};
+
+/** Whether a sanitized menu has at least one dish entered. */
+const menuHasContent = (menu) =>
+  Object.values(menu || {}).some((m) => MESS_MEALS.some((meal) => (m[meal] || '').trim()));
+
 /** Keep the convenience array on the user in sync with node membership. */
 const syncUserNodes = async (userId) => {
   const nodeIds = await CommunityNode.find({ members: userId }).distinct('nodeId');
@@ -56,6 +94,8 @@ const toNodeDTO = (n, userId) => {
     isPending: (n.pendingRequests || []).includes(userId),
     pendingCount: (n.pendingRequests || []).length,
     votingEnabled: votingEnabled(n.nature),
+    // Members can view the community baseline timetable (Academic communities).
+    baselineSchedule: n.baselineSchedule || [],
     // Only admins ever see the invite code.
     inviteCode: admin ? n.inviteCode : undefined,
   };
@@ -65,29 +105,38 @@ const toNodeDTO = (n, userId) => {
 exports.createNode = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { name, nodeType, nature, description } = req.body;
+    const { name, nodeType, nature, description, menu } = req.body;
     if (!name || !name.trim())
       return res.status(400).json({ success: false, message: 'Community name is required.' });
 
     const safeNature = ['accountability', 'wellbeing'].includes(nature)
       ? nature
       : 'accountability';
+    const safeNodeType = nodeType || 'General';
+    const isMess = safeNodeType === 'Mess';
 
-    // Every community is now PRIVATE: discovery is off and joining is invite-only.
-    // (Public / locked policies are retired — see product spec.)
-    // Class (Academic) communities carry a shared baseline timetable so joining
-    // members can reconcile their own schedule against the group's.
-    let baselineSchedule = [];
-    if (nodeType === 'Academic') {
+    // Accountability communities MUST be created with a baseline timetable
+    // (Class / Gym / General) or menu (Mess). Wellbeing groups carry neither.
+    // The timetable falls back to the creator's saved routine when not supplied.
+    let baselineSchedule = cleanSchedule(req.body.baselineSchedule);
+    if (!baselineSchedule.length && !isMess) {
       const routine = await BaselineRoutine.findOne({ userId });
-      if (routine && routine.slots.length) {
-        baselineSchedule = routine.slots.map((s) => ({
-          day: s.day,
-          subject: s.subject,
-          timeStart: s.timeStart || null,
-          timeEnd: s.timeEnd || null,
-          room: s.room || null,
-        }));
+      if (routine && routine.slots.length) baselineSchedule = cleanSchedule(routine.slots);
+    }
+    const cleanedMenu = cleanMenu(menu);
+
+    if (safeNature === 'accountability') {
+      if (isMess && !menuHasContent(cleanedMenu)) {
+        return res.status(400).json({
+          success: false,
+          message: 'A Mess community needs a menu. Upload or enter the weekly menu to create it.',
+        });
+      }
+      if (!isMess && baselineSchedule.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Accountability communities need a timetable. Upload or enter it to create the community.',
+        });
       }
     }
 
@@ -95,10 +144,10 @@ exports.createNode = async (req, res) => {
       nodeId: buildNodeId(name),
       name: name.trim(),
       description: (description || '').trim(),
-      nodeType: nodeType || 'General',
+      nodeType: safeNodeType,
       nature: safeNature,
+      // Every community is now PRIVATE: discovery is off and joining is invite-only.
       visibility: 'private',
-      // Invite-only: a join policy is irrelevant for private nodes.
       joinPolicy: 'locked',
       // The creator owns and administers the community they made.
       crUserId: userId,
@@ -109,6 +158,15 @@ exports.createNode = async (req, res) => {
       baselineSchedule,
       nodeRules: { privacy: 'invite' },
     });
+
+    // Mess communities store their shared menu in MessMenu (keyed by nodeId).
+    if (isMess && menuHasContent(cleanedMenu)) {
+      await MessMenu.findOneAndUpdate(
+        { nodeId: node.nodeId },
+        { $set: { menu: cleanedMenu, uploadedBy: userId } },
+        { new: true, upsert: true }
+      );
+    }
 
     await syncUserNodes(userId);
     return res.status(201).json({ success: true, data: toNodeDTO(node, userId) });
@@ -236,34 +294,55 @@ const menuDocToObject = (doc) => {
   return out;
 };
 
+/** Convert a stored personal-menu Map into a plain (case-preserving) object. */
+const personalMenuToObject = (map) => {
+  if (!map) return null;
+  const out = {};
+  const entries = map instanceof Map ? map.entries() : Object.entries(map);
+  for (const [day, meals] of entries) {
+    const m = meals || {};
+    out[day] = {
+      breakfast: m.breakfast || '',
+      lunch: m.lunch || '',
+      snacks: m.snacks || '',
+      dinner: m.dinner || '',
+    };
+  }
+  return Object.keys(out).length ? out : null;
+};
+
 /**
- * After joining a Class (Academic) or Mess community, detect whether the
- * group's baseline timetable / menu differs from the user's own profile data.
- * Returns a conflict descriptor the client uses to offer Sync vs Keep-Own, or
- * null when there is nothing to reconcile.
+ * On joining a Class (Academic) or Mess community, OVERRIDE the member's
+ * personal timetable / menu with the community's baseline and return an
+ * "adoption" descriptor so the client can showcase what was applied (and offer
+ * an undo back to the previous version). Returns null when the community has no
+ * baseline to adopt.
  */
-const detectJoinConflict = async (node, userId) => {
+const applyJoinAdoption = async (node, userId) => {
   if (node.nodeType === 'Academic') {
-    const communitySchedule = node.baselineSchedule || [];
+    const communitySchedule = cleanSchedule(node.baselineSchedule || []);
     if (!communitySchedule.length) return null;
+
     const routine = await BaselineRoutine.findOne({ userId });
-    const personalSchedule = routine?.slots || [];
-    if (!personalSchedule.length) return null; // nothing to overwrite — no prompt
-    const same =
-      JSON.stringify(normalizeSchedule(communitySchedule)) ===
-      JSON.stringify(normalizeSchedule(personalSchedule));
-    if (same) return null;
+    const previousSchedule = routine ? cleanSchedule(routine.slots) : [];
+    const changed =
+      JSON.stringify(normalizeSchedule(communitySchedule)) !==
+      JSON.stringify(normalizeSchedule(previousSchedule));
+
+    // Override the personal timetable with the community's version.
+    await BaselineRoutine.findOneAndUpdate(
+      { userId },
+      { $set: { slots: communitySchedule, source: 'community_sync' } },
+      { new: true, upsert: true }
+    );
+
     return {
       kind: 'class',
       nodeId: node.nodeId,
       nodeName: node.name,
-      communitySchedule: communitySchedule.map((s) => ({
-        day: s.day,
-        subject: s.subject,
-        timeStart: s.timeStart || '',
-        timeEnd: s.timeEnd || '',
-        room: s.room || '',
-      })),
+      changed,
+      communitySchedule,
+      previousSchedule,
     };
   }
 
@@ -271,18 +350,24 @@ const detectJoinConflict = async (node, userId) => {
     const menuDoc = await MessMenu.findOne({ nodeId: node.nodeId });
     const communityMenu = menuDocToObject(menuDoc);
     if (!communityMenu) return null;
+
     const user = await User.findOne({ userId });
-    const personalMenu = user?.personalMessMenu;
-    const hasPersonal = personalMenu && (personalMenu.size > 0 || Object.keys(personalMenu).length > 0);
-    if (!hasPersonal) return null; // nothing to overwrite — no prompt
-    const same =
-      JSON.stringify(normalizeMenu(communityMenu)) === JSON.stringify(normalizeMenu(personalMenu));
-    if (same) return null;
+    if (!user) return null;
+    const previousMenu = personalMenuToObject(user.personalMessMenu);
+    const changed =
+      JSON.stringify(normalizeMenu(communityMenu)) !== JSON.stringify(normalizeMenu(previousMenu || {}));
+
+    // Override the personal menu with the community's version.
+    user.personalMessMenu = communityMenu;
+    await user.save();
+
     return {
       kind: 'mess',
       nodeId: node.nodeId,
       nodeName: node.name,
+      changed,
       communityMenu,
+      previousMenu,
     };
   }
 
@@ -305,10 +390,11 @@ exports.joinByCode = async (req, res) => {
     await CommunityNode.updateOne({ nodeId: node.nodeId }, { $addToSet: { members: userId } });
     await syncUserNodes(userId);
 
-    // Class/Mess sync conflict resolution: only prompt on a fresh join.
-    let conflict = null;
+    // Class/Mess: adopt (override personal with) the community baseline on a
+    // fresh join, and tell the client so it can showcase the adopted version.
+    let adopted = null;
     if (!wasMember) {
-      conflict = await detectJoinConflict(node, userId);
+      adopted = await applyJoinAdoption(node, userId);
     }
 
     return res.status(200).json({
@@ -316,11 +402,57 @@ exports.joinByCode = async (req, res) => {
       status: 'joined',
       message: `Joined ${node.name}.`,
       data: toNodeDTO(node, userId),
-      conflict,
+      adopted,
     });
   } catch (error) {
     console.error('Join By Code Error:', error);
     return res.status(500).json({ success: false, message: 'Server error joining community.' });
+  }
+};
+
+// PUT /api/v1/community/nodes/:nodeId/baseline   { schedule } | { menu }
+// Admin-only: update the community's baseline timetable (Academic) or menu (Mess).
+exports.updateBaseline = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
+    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
+    if (!isAdminOf(node, userId) && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only an admin can update the community timetable.' });
+    }
+
+    if (node.nodeType === 'Mess') {
+      const cleaned = cleanMenu(req.body.menu);
+      if (!menuHasContent(cleaned)) {
+        return res.status(400).json({ success: false, message: 'The menu cannot be empty.' });
+      }
+      const doc = await MessMenu.findOneAndUpdate(
+        { nodeId: node.nodeId },
+        { $set: { menu: cleaned, uploadedBy: userId } },
+        { new: true, upsert: true }
+      );
+      return res.status(200).json({
+        success: true,
+        message: 'Community menu updated.',
+        data: { menu: menuDocToObject(doc) },
+      });
+    }
+
+    // Academic / other accountability types -> baseline timetable.
+    const schedule = cleanSchedule(req.body.schedule);
+    if (!schedule.length) {
+      return res.status(400).json({ success: false, message: 'The timetable cannot be empty.' });
+    }
+    node.baselineSchedule = schedule;
+    await node.save();
+    return res.status(200).json({
+      success: true,
+      message: 'Community timetable updated.',
+      data: { baselineSchedule: node.baselineSchedule },
+    });
+  } catch (error) {
+    console.error('Update Baseline Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error updating community baseline.' });
   }
 };
 

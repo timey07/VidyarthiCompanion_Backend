@@ -12,7 +12,9 @@ const {
   promoteMember,
   listNodeMembers,
   getNodeFeed,
+  updateBaseline,
 } = require('./node.controller');
+const { getMessVotes, castMessVote } = require('./messVote.controller');
 
 // --- Alerts (wellbeing / wellness nudges) ---
 router.get('/alerts', listAlerts);
@@ -32,5 +34,12 @@ router.post('/nodes/:nodeId/approve', approveRequest);
 router.post('/nodes/:nodeId/admins', promoteMember);
 router.get('/nodes/:nodeId/members', listNodeMembers);
 router.get('/nodes/:nodeId/feed', getNodeFeed);
+
+// Admin-only: update the community's baseline timetable (Academic) or menu (Mess).
+router.put('/nodes/:nodeId/baseline', updateBaseline);
+
+// Mess community per-meal voting (Eatable / Leave), time-gated to the current meal.
+router.get('/nodes/:nodeId/mess-vote', getMessVotes);
+router.post('/nodes/:nodeId/mess-vote', castMessVote);
 
 module.exports = router;
