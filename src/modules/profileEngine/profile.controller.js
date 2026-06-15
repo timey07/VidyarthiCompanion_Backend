@@ -12,6 +12,23 @@ const listUserNodesByType = async (userId, nodeType) => {
   return nodes.map((n) => ({ nodeId: n.nodeId, name: n.name }));
 };
 
+/** Convert a stored meals Map (day -> meals) into a plain weekly object. */
+const messMapToObject = (map) => {
+  if (!map) return null;
+  const out = {};
+  const entries = map instanceof Map ? map.entries() : Object.entries(map);
+  for (const [day, meals] of entries) {
+    const m = meals || {};
+    out[day] = {
+      breakfast: m.breakfast || '',
+      lunch: m.lunch || '',
+      snacks: m.snacks || '',
+      dinner: m.dinner || '',
+    };
+  }
+  return Object.keys(out).length ? out : null;
+};
+
 const menuToObject = (doc) => {
   if (!doc) return null;
   const menu = {};
@@ -46,6 +63,9 @@ exports.getProfile = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
+        username: user.username || null,
+        name: user.name,
+        email: user.email,
         financial: {
           monthlyBudget: user.financialConfig.monthlyBudget,
           safeBufferPct: user.financialConfig.safeBufferPct || 0,
@@ -58,6 +78,7 @@ exports.getProfile = async (req, res) => {
         gymCommunities,
         schedule: routine ? routine.slots : [],
         menu: menuToObject(menuDoc),
+        personalMenu: messMapToObject(user.personalMessMenu),
         aiEnabled: gemini.hasKey(),
       },
     });
@@ -238,5 +259,54 @@ exports.getMenu = async (req, res) => {
   } catch (error) {
     console.error('Get Menu Error:', error);
     return res.status(500).json({ success: false, message: 'Server error loading menu.' });
+  }
+};
+
+// GET /api/v1/profile/personal-menu
+// The user's OWN mess menu, kept independently of any Mess community.
+exports.getPersonalMenu = async (req, res) => {
+  try {
+    const user = await User.findOne({ userId: req.user.userId });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+    return res.status(200).json({ success: true, data: { menu: messMapToObject(user.personalMessMenu) } });
+  } catch (error) {
+    console.error('Get Personal Menu Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error loading personal menu.' });
+  }
+};
+
+// POST /api/v1/profile/personal-menu   { menu }
+// Persist the user's personal mess menu (never shared with a community).
+exports.savePersonalMenu = async (req, res) => {
+  try {
+    const user = await User.findOne({ userId: req.user.userId });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    const { menu } = req.body;
+    const clean = {};
+    if (menu && typeof menu === 'object') {
+      for (const day of DAYS) {
+        const m = menu[day];
+        if (m) {
+          clean[day] = {
+            breakfast: m.breakfast || '',
+            lunch: m.lunch || '',
+            snacks: m.snacks || '',
+            dinner: m.dinner || '',
+          };
+        }
+      }
+    }
+
+    user.personalMessMenu = clean;
+    await user.save();
+    return res.status(200).json({
+      success: true,
+      message: 'Personal menu saved.',
+      data: { menu: messMapToObject(user.personalMessMenu) },
+    });
+  } catch (error) {
+    console.error('Save Personal Menu Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error saving personal menu.' });
   }
 };

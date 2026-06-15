@@ -1,6 +1,26 @@
 const mongoose = require('mongoose');
 
 /**
+ * A single weekly class slot mirrored from a member's BaselineRoutine. For
+ * Class (Academic) communities this acts as the shared baseline timetable that
+ * a joining member's personal schedule is reconciled against (Sync / Keep Own).
+ */
+const baselineSlotSchema = new mongoose.Schema(
+  {
+    day: {
+      type: String,
+      enum: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+      required: true,
+    },
+    subject: { type: String, required: true, trim: true },
+    timeStart: { type: String, default: null },
+    timeEnd: { type: String, default: null },
+    room: { type: String, default: null },
+  },
+  { _id: false }
+);
+
+/**
  * A CommunityNode is one social graph / shared space (a class section, gym
  * circle, mess community, ADHD support circle, etc.). Updates posted to a node
  * are visible to all its members, and the node owner (CR) carries extra
@@ -72,6 +92,10 @@ const communityNodeSchema = new mongoose.Schema(
 
     // Secret deep-link code used to join PRIVATE nodes (invite-based access).
     inviteCode: { type: String, default: null, index: true },
+
+    // Shared baseline timetable for Class (Academic) communities. Used for the
+    // Sync / Keep-Own conflict resolution when a member joins by invite code.
+    baselineSchedule: { type: [baselineSlotSchema], default: [] },
 
     // Legacy rules object retained for backwards compatibility.
     nodeRules: {
