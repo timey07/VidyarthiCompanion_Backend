@@ -112,7 +112,7 @@ const findDuplicate = async ({ userId, nodeId, eventName, date, location }) => {
  *
  * @returns {Promise<{event, status: 'created'|'merged'|'unchanged'}>}
  */
-const upsertEvent = async ({ userId, nodeId, eventName, date, location, confidenceScore }) => {
+const upsertEvent = async ({ userId, nodeId, eventName, date, location, confidenceScore, category }) => {
   const dup = await findDuplicate({ userId, nodeId, eventName, date, location });
 
   if (dup) {
@@ -131,6 +131,7 @@ const upsertEvent = async ({ userId, nodeId, eventName, date, location, confiden
     date,
     location,
     confidenceScore: confidenceScore ?? 0.5,
+    category: category === 'deadline' ? 'deadline' : 'alert',
   });
   await seedCreatorConsensus(created, userId);
   return { event: created, status: 'created' };

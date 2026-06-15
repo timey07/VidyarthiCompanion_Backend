@@ -46,6 +46,9 @@ const resolveTargetNode = async (nodeId, userId) => {
   return node ? node.nodeId : null;
 };
 
+/** Normalize any raw category value to one of the two supported buckets. */
+const normalizeCategory = (raw) => (String(raw || '').toLowerCase() === 'deadline' ? 'deadline' : 'alert');
+
 // POST /api/v1/overrides/verify  (image / PDF / CSV / ICS via Gemini OCR)
 exports.verifyOverride = async (req, res) => {
   try {
@@ -80,6 +83,7 @@ exports.verifyOverride = async (req, res) => {
         date: eventDate,
         location: event.location || 'TBD',
         confidenceScore: event.confidenceScore || 0.5,
+        category: normalizeCategory(event.category),
       });
 
       counts[status] += 1;
@@ -87,9 +91,12 @@ exports.verifyOverride = async (req, res) => {
       savedEvents.push(saved);
     }
 
+    const deadlineCount = savedEvents.filter((e) => e.category === 'deadline').length;
+    const alertCount = savedEvents.length - deadlineCount;
+
     return res.status(200).json({
       success: true,
-      message: `Processed ${savedEvents.length} events (${counts.created} new, ${counts.merged} echoed, ${counts.unchanged} duplicates).`,
+      message: `Processed ${savedEvents.length} items — ${deadlineCount} deadline(s), ${alertCount} alert(s).`,
       data: savedEvents,
     });
   } catch (error) {
@@ -102,7 +109,7 @@ exports.verifyOverride = async (req, res) => {
 exports.createManualEvent = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { eventName, date, time, location, nodeId } = req.body;
+    const { eventName, date, time, location, nodeId, category } = req.body;
 
     if (!eventName || !eventName.trim()) {
       return res.status(400).json({ success: false, message: 'Event name is required.' });
@@ -121,6 +128,7 @@ exports.createManualEvent = async (req, res) => {
       date: eventDate,
       location: (location && location.trim()) || 'TBD',
       confidenceScore: 1.0, // manual entry is high-confidence by definition
+      category: normalizeCategory(category),
     });
 
     if (status === 'created') alertScheduler.scheduleEventAlert(saved);

@@ -28,6 +28,15 @@ const academicEventSchema = new mongoose.Schema({
     type: Number, 
     required: true 
   },
+  // Override-engine classification of the source: an actionable "deadline"
+  // (submission / due date / exam) vs an informational "alert" (notice,
+  // announcement, or scheduled happening). Every ingested item is one or the other.
+  category: {
+    type: String,
+    enum: ['alert', 'deadline'],
+    default: 'alert',
+    index: true,
+  },
   // Trust-weighted community consensus. Drives the verification lifecycle:
   // seeded with the creator's trustScore, then moved by community votes.
   consensusScore: {

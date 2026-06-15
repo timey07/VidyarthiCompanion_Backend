@@ -12,6 +12,12 @@ const extractEventFromImage = async (base64String) => {
     const systemPrompt = `You are a strict data extraction AI. Scan the provided schedule (it may be an image, a PDF, or CSV/ICS text) and extract ALL events listed on it.
     For each event, extract the event name, date, time, and location. Calculate a confidence score between 0.0 and 1.0.
 
+    CLASSIFICATION RULES (critical):
+    Classify EACH item into exactly one "category":
+    - "deadline": something that is DUE or must be submitted/completed by a point in time — assignment/project/report submissions, fee payments, registration/form deadlines, exams, tests, quizzes, application due dates. Anything with a "due", "last date", "submit by", or "deadline" sense.
+    - "alert": informational notices and scheduled happenings that are NOT a submission — announcements, holidays, events, seminars, guest lectures, club activities, schedule changes, reminders, meetings, classes.
+    If genuinely ambiguous, prefer "alert".
+
     DATE RULES (critical):
     - Only output a date that is explicitly present in the source.
     - NEVER invent, guess, or default a date. If no date is shown, set "date" to null.
@@ -23,6 +29,7 @@ const extractEventFromImage = async (base64String) => {
       "events": [
         {
           "eventName": "string",
+          "category": "alert" | "deadline",
           "date": "YYYY-MM-DD or null",
           "time": "HH:MM or null",
           "location": "string or null",
