@@ -2,8 +2,10 @@ const CommunityAlert = require('../../sharedModels/CommunityAlert.model');
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const CommunityNode = require('../../sharedModels/CommunityNode.model');
 const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
+const User = require('../../sharedModels/User.model');
 const consensusService = require('./consensus.service');
 const { getUserNodeIds } = require('./node.controller');
+const { getActiveMeetupsForUser } = require('../empathyMesh/meetupBooking.service');
 
 // GET /api/v1/community/events
 // Node-scoped schedule feed: events shared with the user's community nodes,
@@ -51,6 +53,43 @@ exports.listScheduleEvents = async (req, res) => {
       nodeName: e.nodeId ? nodeNameMap.get(e.nodeId) || null : null,
       myVote: voteMap.get(e._id.toString()) || 0,
     }));
+
+    // Merge the user's Empathy Mesh Meet Ups onto the calendar. These have their
+    // OWN lifecycle (not academic consensus), so they bypass the status filter:
+    //   proposed -> tentative (returned as 'pending' so the calendar flags it)
+    //   accepted -> confirmed (returned as 'verified')
+    // We skip them only when the caller explicitly asked for 'rejected'.
+    if (status !== 'rejected') {
+      let meetups = await getActiveMeetupsForUser(userId);
+      if (nodeId) meetups = meetups.filter((m) => m.nodeId === nodeId);
+      if (meetups.length) {
+        const otherIds = meetups.map((m) => (m.initiatorId === userId ? m.targetId : m.initiatorId));
+        const mNodeIds = [...new Set(meetups.map((m) => m.nodeId))];
+        const [others, mNodes] = await Promise.all([
+          User.find({ userId: { $in: otherIds } }).select('userId name'),
+          CommunityNode.find({ nodeId: { $in: mNodeIds } }).select('nodeId name'),
+        ]);
+        const meetupNameOf = new Map(others.map((u) => [u.userId, u.name]));
+        const meetupNodeName = new Map(mNodes.map((n) => [n.nodeId, n.name]));
+        for (const m of meetups) {
+          const otherId = m.initiatorId === userId ? m.targetId : m.initiatorId;
+          data.push({
+            id: `meetup-${m._id.toString()}`,
+            eventName: `Meet Up with ${meetupNameOf.get(otherId) || otherId}`,
+            date: m.startAt,
+            location: meetupNodeName.get(m.nodeId) || 'Empathy Mesh',
+            confidenceScore: 100,
+            consensusScore: 0,
+            status: m.status === 'accepted' ? 'verified' : 'pending',
+            nodeId: m.nodeId,
+            nodeName: meetupNodeName.get(m.nodeId) || null,
+            myVote: 0,
+            kind: 'meetup',
+          });
+        }
+        data.sort((a, b) => new Date(a.date) - new Date(b.date));
+      }
+    }
 
     return res.status(200).json({ success: true, data });
   } catch (error) {

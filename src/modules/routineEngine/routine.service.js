@@ -1,6 +1,7 @@
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const User = require('../../sharedModels/User.model');
 const CommunityNode = require('../../sharedModels/CommunityNode.model');
+const Meetup = require('../../sharedModels/Meetup.model');
 const { calculateBurnoutScore } = require('../empathyMesh/safeSkip.service');
 const { calculateAffordableMeals, daysRemainingInMonth } = require('../pocketBuddy/meal.service');
 const { getUserNodeIds } = require('../communityEngine/node.controller');
@@ -27,10 +28,18 @@ const classifyEvent = (name = '') => {
 };
 
 /**
- * Empathy Mesh cross-member alerts: if a fellow member of any of the user's
- * wellbeing (Empathy) communities has a HIGH burnout score, surface a gentle
- * "reach out" card in THIS user's Today's Plan so the circle can support them.
+ * Empathy Mesh cross-member cards. Two intertwined concerns:
+ *
+ *  1. Reach-out: a fellow member of one of the user's wellbeing (Empathy)
+ *     communities has a HIGH burnout score and NO Meet Up arranged yet — show a
+ *     gentle "Schedule a Meet Up" card.
+ *  2. Meet Ups: once a Meet Up exists for a member, the burnout notice becomes a
+ *     status card that every mesh member sees ("Y scheduled a Meet Up with X").
+ *     The target gets an actionable invite (accept / decline / change time); the
+ *     proposer sees a "pending"/"confirmed" card.
  */
+const ACTIVE_MEETUP_STATUSES = ['proposed', 'accepted'];
+
 const buildEmpathyAlerts = async (userId) => {
   const empathyNodes = await CommunityNode.find({
     members: userId,
@@ -38,6 +47,9 @@ const buildEmpathyAlerts = async (userId) => {
   }).select('nodeId name members');
 
   if (!empathyNodes.length) return [];
+
+  const empathyNodeIds = empathyNodes.map((n) => n.nodeId);
+  const nodeNameOf = new Map(empathyNodes.map((n) => [n.nodeId, n.name]));
 
   // Unique fellow members across all the user's empathy circles.
   const peers = new Map(); // memberId -> { nodeId, nodeName }
@@ -48,33 +60,119 @@ const buildEmpathyAlerts = async (userId) => {
       }
     }
   }
-  if (!peers.size) return [];
-
   const peerIds = [...peers.keys()];
-  const [scores, users] = await Promise.all([
-    Promise.all(peerIds.map((id) => calculateBurnoutScore(id).catch(() => null))),
-    User.find({ userId: { $in: peerIds } }).select('userId name'),
+
+  // Active Meet Ups anywhere in the user's empathy circles + peer burnout scores.
+  const [meetups, scores] = await Promise.all([
+    Meetup.find({ status: { $in: ACTIVE_MEETUP_STATUSES }, nodeId: { $in: empathyNodeIds } }),
+    peerIds.length
+      ? Promise.all(peerIds.map((id) => calculateBurnoutScore(id).catch(() => null)))
+      : Promise.resolve([]),
   ]);
+  const burnoutOf = new Map(peerIds.map((id, i) => [id, scores[i]]));
+
+  // Names for anyone we might mention (peers + meetup participants).
+  const mentionIds = new Set(peerIds);
+  for (const m of meetups) {
+    mentionIds.add(m.initiatorId);
+    mentionIds.add(m.targetId);
+  }
+  const users = await User.find({ userId: { $in: [...mentionIds] } }).select('userId name');
   const nameOf = new Map(users.map((u) => [u.userId, u.name]));
+  const label = (id) => nameOf.get(id) || 'A member';
+
+  // Members already engaged in an active Meet Up -> suppress their reach-out card.
+  const engaged = new Set();
+  for (const m of meetups) {
+    engaged.add(m.initiatorId);
+    engaged.add(m.targetId);
+  }
 
   const cards = [];
-  peerIds.forEach((memberId, i) => {
-    const score = scores[i];
-    if (!score || !score.recommendSkip) return; // only HIGH-burnout members
+
+  // 1) Meet Up cards (these REPLACE the burnout notice once a Meet Up exists).
+  for (const m of meetups) {
+    const iAmParticipant = m.initiatorId === userId || m.targetId === userId;
+    const otherId = m.initiatorId === userId ? m.targetId : m.initiatorId;
+    const nodeName = nodeNameOf.get(m.nodeId) || 'your Empathy Mesh';
+    const meetupId = m._id.toString();
+
+    if (iAmParticipant && m.status === 'proposed' && m.pendingForId === userId) {
+      // It's MY turn to respond -> actionable invite.
+      cards.push({
+        id: `meetup-invite-${meetupId}`,
+        kind: 'wellbeing',
+        type: 'meetup_invite',
+        priority: 90,
+        title: `${label(m.proposedById)} scheduled a Meet Up with you`,
+        note: `In "${nodeName}". Accept, decline, or pick a new time.`,
+        date: m.startAt,
+        meetupId,
+        nodeId: m.nodeId,
+        otherUserId: otherId,
+        status: m.status,
+      });
+      continue;
+    }
+
+    if (iAmParticipant && m.status === 'proposed') {
+      // I proposed; waiting on the other side.
+      cards.push({
+        id: `meetup-wait-${meetupId}`,
+        kind: 'wellbeing',
+        type: 'empathy_alert',
+        priority: 80,
+        title: `Meet Up pending with ${label(otherId)}`,
+        note: `Waiting for them to confirm the time in "${nodeName}".`,
+        date: m.startAt,
+      });
+      continue;
+    }
+
+    if (iAmParticipant && m.status === 'accepted') {
+      cards.push({
+        id: `meetup-confirmed-${meetupId}`,
+        kind: 'wellbeing',
+        type: 'empathy_alert',
+        priority: 80,
+        title: `Meet Up confirmed with ${label(otherId)}`,
+        note: `Added to your calendar · "${nodeName}".`,
+        date: m.startAt,
+      });
+      continue;
+    }
+
+    // I'm a fellow member (not a participant): mesh-wide status visibility.
+    cards.push({
+      id: `meetup-mesh-${meetupId}`,
+      kind: 'wellbeing',
+      type: 'empathy_alert',
+      priority: 70,
+      title: `${label(m.initiatorId)} scheduled a Meet Up with ${label(m.targetId)}`,
+      note: `In your Empathy Mesh "${nodeName}".`,
+      date: m.startAt,
+    });
+  }
+
+  // 2) Reach-out cards: HIGH-burnout peers WITHOUT a Meet Up arranged yet.
+  for (const memberId of peerIds) {
+    if (engaged.has(memberId)) continue;
+    const score = burnoutOf.get(memberId);
+    if (!score || !score.recommendSkip) continue;
     const ctx = peers.get(memberId);
-    const name = nameOf.get(memberId) || 'A member';
     cards.push({
       id: `empathy-alert-${memberId}`,
       kind: 'wellbeing',
       type: 'empathy_alert',
-      priority: 88, // below the user's own Safe-Skip (92), above budget
-      title: `${name} may be struggling (burnout ${score.burnoutScore}/10)`,
-      note: `In your Empathy Mesh "${ctx.nodeName}". Consider a Meet Up to check in.`,
+      priority: 88,
+      title: `${label(memberId)} may be struggling (burnout ${score.burnoutScore}/10)`,
+      note: `In your Empathy Mesh "${ctx.nodeName}". Schedule a Meet Up to check in.`,
       action: 'meet_up',
       nodeId: ctx.nodeId,
       memberId,
     });
-  });
+  }
+
   return cards;
 };
 
