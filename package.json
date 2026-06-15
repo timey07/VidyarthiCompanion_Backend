@@ -1,5 +1,5 @@
 {
-  "name": "campus-os-api",
+  "name": "vidyarthicompanion-api",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
