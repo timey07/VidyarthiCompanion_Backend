@@ -8,6 +8,8 @@ const {
   getSchedule,
   saveMenu,
   getMenu,
+  getPersonalMenu,
+  savePersonalMenu,
 } = require('./profile.controller');
 
 // GET  /api/v1/profile               -> full profile (financial, communities, schedule, menu)
@@ -26,5 +28,9 @@ router.post('/schedule', saveSchedule);
 // Mess menu (shared per community)
 router.get('/menu', getMenu);
 router.post('/menu', saveMenu);
+
+// Personal mess menu (private to the user)
+router.get('/personal-menu', getPersonalMenu);
+router.post('/personal-menu', savePersonalMenu);
 
 module.exports = router;

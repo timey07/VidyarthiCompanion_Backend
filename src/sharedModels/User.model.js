@@ -23,6 +23,15 @@ const userSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // Public, user-chosen handle shown across the app (profile, nav, etc.).
+    // Login still uses email; this is purely the display/identity handle.
+    username: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      index: true,
+    },
     email: {
       type: String,
       required: true,
@@ -66,6 +75,22 @@ const userSchema = new mongoose.Schema(
     primaryMessNodeId: { type: String, default: null },
     // The user's chosen primary Gym community (for fuel/protein nudges).
     primaryGymNodeId: { type: String, default: null },
+    // Personal mess menu (day -> meals) the user maintains independently of any
+    // Mess community. Used when the student is not in a Mess group, or wants to
+    // keep their own menu after a Sync / Keep-Own conflict resolution.
+    personalMessMenu: {
+      type: Map,
+      of: new mongoose.Schema(
+        {
+          breakfast: { type: String, default: '' },
+          lunch: { type: String, default: '' },
+          snacks: { type: String, default: '' },
+          dinner: { type: String, default: '' },
+        },
+        { _id: false }
+      ),
+      default: {},
+    },
     // Personalisation thresholds for the Empathy Mesh / routine engine.
     wellnessThresholds: {
       minSleepHours: { type: Number, default: 6 },
@@ -87,6 +112,7 @@ userSchema.methods.toPublicJSON = function () {
   return {
     userId: this.userId,
     name: this.name,
+    username: this.username || null,
     email: this.email,
     role: this.role,
     trustScore: this.trustScore,

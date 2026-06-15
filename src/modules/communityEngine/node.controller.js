@@ -2,6 +2,8 @@ const CommunityNode = require('../../sharedModels/CommunityNode.model');
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
 const User = require('../../sharedModels/User.model');
+const BaselineRoutine = require('../../sharedModels/BaselineRoutine.model');
+const MessMenu = require('../../sharedModels/MessMenu.model');
 
 /** Build a stable, unique-ish nodeId slug from a name. */
 const buildNodeId = (name) => {
@@ -63,15 +65,31 @@ const toNodeDTO = (n, userId) => {
 exports.createNode = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { name, nodeType, nature, visibility, joinPolicy, description } = req.body;
+    const { name, nodeType, nature, description } = req.body;
     if (!name || !name.trim())
       return res.status(400).json({ success: false, message: 'Community name is required.' });
 
     const safeNature = ['accountability', 'wellbeing'].includes(nature)
       ? nature
       : 'accountability';
-    const safeVisibility = visibility === 'private' ? 'private' : 'public';
-    const safeJoinPolicy = joinPolicy === 'locked' ? 'locked' : 'open';
+
+    // Every community is now PRIVATE: discovery is off and joining is invite-only.
+    // (Public / locked policies are retired — see product spec.)
+    // Class (Academic) communities carry a shared baseline timetable so joining
+    // members can reconcile their own schedule against the group's.
+    let baselineSchedule = [];
+    if (nodeType === 'Academic') {
+      const routine = await BaselineRoutine.findOne({ userId });
+      if (routine && routine.slots.length) {
+        baselineSchedule = routine.slots.map((s) => ({
+          day: s.day,
+          subject: s.subject,
+          timeStart: s.timeStart || null,
+          timeEnd: s.timeEnd || null,
+          room: s.room || null,
+        }));
+      }
+    }
 
     const node = await CommunityNode.create({
       nodeId: buildNodeId(name),
@@ -79,16 +97,17 @@ exports.createNode = async (req, res) => {
       description: (description || '').trim(),
       nodeType: nodeType || 'General',
       nature: safeNature,
-      visibility: safeVisibility,
-      // join policy is only meaningful for public nodes
-      joinPolicy: safeVisibility === 'public' ? safeJoinPolicy : 'locked',
+      visibility: 'private',
+      // Invite-only: a join policy is irrelevant for private nodes.
+      joinPolicy: 'locked',
       // The creator owns and administers the community they made.
       crUserId: userId,
       admins: [userId],
       members: [userId],
       pendingRequests: [],
-      inviteCode: safeVisibility === 'private' ? buildInviteCode() : null,
-      nodeRules: { privacy: safeVisibility === 'private' ? 'invite' : 'open' },
+      inviteCode: buildInviteCode(),
+      baselineSchedule,
+      nodeRules: { privacy: 'invite' },
     });
 
     await syncUserNodes(userId);
@@ -172,6 +191,104 @@ exports.joinNode = async (req, res) => {
   }
 };
 
+/** Normalize a list of class slots into a stable, comparable shape. */
+const normalizeSchedule = (slots = []) =>
+  (slots || [])
+    .map((s) => ({
+      day: s.day,
+      subject: String(s.subject || '').trim().toLowerCase(),
+      timeStart: s.timeStart || '',
+      timeEnd: s.timeEnd || '',
+      room: String(s.room || '').trim().toLowerCase(),
+    }))
+    .sort((a, b) =>
+      `${a.day}${a.timeStart}${a.subject}`.localeCompare(`${b.day}${b.timeStart}${b.subject}`)
+    );
+
+/** Normalize a weekly menu (Map or object) into a comparable plain object. */
+const normalizeMenu = (src) => {
+  const out = {};
+  if (!src) return out;
+  const entries = src instanceof Map ? src.entries() : Object.entries(src);
+  for (const [day, meals] of entries) {
+    const m = meals || {};
+    out[day] = {
+      breakfast: String(m.breakfast || '').trim().toLowerCase(),
+      lunch: String(m.lunch || '').trim().toLowerCase(),
+      snacks: String(m.snacks || '').trim().toLowerCase(),
+      dinner: String(m.dinner || '').trim().toLowerCase(),
+    };
+  }
+  return out;
+};
+
+const menuDocToObject = (doc) => {
+  if (!doc) return null;
+  const out = {};
+  for (const [day, meals] of doc.menu.entries()) {
+    out[day] = {
+      breakfast: meals.breakfast || '',
+      lunch: meals.lunch || '',
+      snacks: meals.snacks || '',
+      dinner: meals.dinner || '',
+    };
+  }
+  return out;
+};
+
+/**
+ * After joining a Class (Academic) or Mess community, detect whether the
+ * group's baseline timetable / menu differs from the user's own profile data.
+ * Returns a conflict descriptor the client uses to offer Sync vs Keep-Own, or
+ * null when there is nothing to reconcile.
+ */
+const detectJoinConflict = async (node, userId) => {
+  if (node.nodeType === 'Academic') {
+    const communitySchedule = node.baselineSchedule || [];
+    if (!communitySchedule.length) return null;
+    const routine = await BaselineRoutine.findOne({ userId });
+    const personalSchedule = routine?.slots || [];
+    if (!personalSchedule.length) return null; // nothing to overwrite — no prompt
+    const same =
+      JSON.stringify(normalizeSchedule(communitySchedule)) ===
+      JSON.stringify(normalizeSchedule(personalSchedule));
+    if (same) return null;
+    return {
+      kind: 'class',
+      nodeId: node.nodeId,
+      nodeName: node.name,
+      communitySchedule: communitySchedule.map((s) => ({
+        day: s.day,
+        subject: s.subject,
+        timeStart: s.timeStart || '',
+        timeEnd: s.timeEnd || '',
+        room: s.room || '',
+      })),
+    };
+  }
+
+  if (node.nodeType === 'Mess') {
+    const menuDoc = await MessMenu.findOne({ nodeId: node.nodeId });
+    const communityMenu = menuDocToObject(menuDoc);
+    if (!communityMenu) return null;
+    const user = await User.findOne({ userId });
+    const personalMenu = user?.personalMessMenu;
+    const hasPersonal = personalMenu && (personalMenu.size > 0 || Object.keys(personalMenu).length > 0);
+    if (!hasPersonal) return null; // nothing to overwrite — no prompt
+    const same =
+      JSON.stringify(normalizeMenu(communityMenu)) === JSON.stringify(normalizeMenu(personalMenu));
+    if (same) return null;
+    return {
+      kind: 'mess',
+      nodeId: node.nodeId,
+      nodeName: node.name,
+      communityMenu,
+    };
+  }
+
+  return null;
+};
+
 // POST /api/v1/community/nodes/join-by-code   { code }
 // The invite-based path for PRIVATE communities (token-style deep link).
 exports.joinByCode = async (req, res) => {
@@ -184,11 +301,23 @@ exports.joinByCode = async (req, res) => {
     if (!node)
       return res.status(404).json({ success: false, message: 'No community matches that invite code.' });
 
+    const wasMember = node.members.includes(userId);
     await CommunityNode.updateOne({ nodeId: node.nodeId }, { $addToSet: { members: userId } });
     await syncUserNodes(userId);
-    return res
-      .status(200)
-      .json({ success: true, status: 'joined', message: `Joined ${node.name}.`, data: toNodeDTO(node, userId) });
+
+    // Class/Mess sync conflict resolution: only prompt on a fresh join.
+    let conflict = null;
+    if (!wasMember) {
+      conflict = await detectJoinConflict(node, userId);
+    }
+
+    return res.status(200).json({
+      success: true,
+      status: 'joined',
+      message: `Joined ${node.name}.`,
+      data: toNodeDTO(node, userId),
+      conflict,
+    });
   } catch (error) {
     console.error('Join By Code Error:', error);
     return res.status(500).json({ success: false, message: 'Server error joining community.' });

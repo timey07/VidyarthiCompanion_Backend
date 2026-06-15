@@ -16,10 +16,18 @@ const buildUserId = (name) => {
   return `${base}_${suffix}`;
 };
 
+/** Normalize a user-chosen handle into a safe, lowercase username. */
+const normalizeUsername = (username) =>
+  String(username || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24);
+
 // POST /api/v1/auth/register
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password, role, username } = req.body;
 
     if (!name || !email || !password) {
       return res
@@ -33,14 +41,26 @@ exports.register = async (req, res) => {
       return res.status(409).json({ success: false, message: 'Email is already registered.' });
     }
 
+    // Resolve a unique username (falls back to a slug of the name).
+    let handle = normalizeUsername(username) || normalizeUsername(name);
+    if (handle.length < 3) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'Username must be at least 3 characters (letters, numbers, _).' });
+    }
+    if (await User.findOne({ username: handle })) {
+      return res.status(409).json({ success: false, message: 'That username is already taken.' });
+    }
+
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Only allow 'student' or 'cr' on self-signup; 'admin' is provisioned internally.
     const safeRole = ['student', 'cr'].includes(role) ? role : 'student';
 
     const user = await User.create({
-      userId: buildUserId(name),
+      userId: buildUserId(handle),
       name: name.trim(),
+      username: handle,
       email: normalizedEmail,
       passwordHash,
       role: safeRole,
