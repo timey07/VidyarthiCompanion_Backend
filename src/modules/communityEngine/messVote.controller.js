@@ -49,6 +49,53 @@ const dishFor = async (nodeId, slot) => {
   return meals[slot] || null;
 };
 
+// How many previous same-weekday occurrences to learn from for pre-suggestion.
+const PRESUGGEST_LOOKBACK_WEEKS = 4;
+
+/** Date keys for the same weekday over the previous N weeks (e.g. last 4 Mondays). */
+const sameWeekdayKeys = (now, weeks) => {
+  const keys = [];
+  for (let w = 1; w <= weeks; w++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 7 * w);
+    keys.push(todayKey(d));
+  }
+  return keys;
+};
+
+/**
+ * Pre-suggest how a meal is likely to be, from how members voted on the SAME
+ * weekday + slot over the previous few weeks. Lets a member set expectations
+ * (and a default lean) before today's votes come in.
+ */
+const preSuggestForSlot = async (nodeId, slot, now = new Date()) => {
+  const weekday = DAY_NAMES[now.getDay()];
+  const keys = sameWeekdayKeys(now, PRESUGGEST_LOOKBACK_WEEKS);
+  const votes = await MessMealVote.find({ nodeId, slot, dateKey: { $in: keys } }).select('verdict');
+
+  let eatable = 0;
+  let leave = 0;
+  for (const v of votes) {
+    if (v.verdict === 'eatable') eatable += 1;
+    else leave += 1;
+  }
+  const total = eatable + leave;
+  if (total === 0) {
+    return { slot, weekday, sampleVotes: 0, likelihood: 'no_data', eatable, leave, eatablePct: null, weeksScanned: PRESUGGEST_LOOKBACK_WEEKS };
+  }
+  const net = eatable - leave;
+  return {
+    slot,
+    weekday,
+    sampleVotes: total,
+    likelihood: net > 0 ? 'likely_good' : net < 0 ? 'likely_poor' : 'mixed',
+    eatable,
+    leave,
+    eatablePct: Math.round((eatable / total) * 100),
+    weeksScanned: PRESUGGEST_LOOKBACK_WEEKS,
+  };
+};
+
 const loadMessNode = async (nodeId, userId) => {
   const node = await CommunityNode.findOne({ nodeId });
   if (!node) return { error: { code: 404, message: 'Community not found.' } };
@@ -70,10 +117,11 @@ exports.getMessVotes = async (req, res) => {
 
     const dateKey = todayKey();
     const slot = currentVotableSlot();
-    const [tallies, myVotes, dish] = await Promise.all([
+    const [tallies, myVotes, dish, preSuggestion] = await Promise.all([
       tallyToday(node.nodeId, dateKey),
       MessMealVote.find({ nodeId: node.nodeId, userId, dateKey }).select('slot verdict'),
       dishFor(node.nodeId, slot),
+      preSuggestForSlot(node.nodeId, slot),
     ]);
 
     const myVoteMap = {};
@@ -89,6 +137,7 @@ exports.getMessVotes = async (req, res) => {
         currentDish: dish,
         slots: tallies,
         myVotes: myVoteMap,
+        preSuggestion,
       },
     });
   } catch (err) {

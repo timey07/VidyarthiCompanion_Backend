@@ -7,7 +7,7 @@ const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
 const MessMenu = require('../../sharedModels/MessMenu.model');
 const MessMealVote = require('../../sharedModels/MessMealVote.model');
 const { _helpers: messVoteHelpers } = require('../communityEngine/messVote.controller');
-const { calculateAffordableMeals, daysRemainingInMonth, DEFAULT_NEARBY_OPTIONS } = require('./meal.service');
+const { calculateAffordableMeals, daysRemainingInMonth, DEFAULT_NEARBY_OPTIONS, computeBudgetTier, buildTierMealPlan } = require('./meal.service');
 const { normalizeMerchantId, prettyName, inferCategory } = require('./merchant.service');
 const gemini = require('../../core/gemini.service');
 
@@ -672,6 +672,42 @@ exports.getMealPlan = async (req, res) => {
   } catch (error) {
     console.error('PocketBuddy Meal Plan Error:', error);
     return res.status(500).json({ success: false, message: 'Server error generating meal plan.' });
+  }
+};
+
+// GET /api/v1/pocket/meal-plan-tier
+// Suggests a low/mid/high budget one-day meal plan by comparing the user's
+// SET daily average (monthly limit ÷ days in month) against the CURRENT average
+// (money left ÷ days left). Meal options come from price-tiered past orders.
+exports.getMealPlanTier = async (req, res) => {
+  try {
+    const user = await User.findOne({ userId: req.user.userId });
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    const analytics = await computeAnalytics(req.user.userId, user);
+    const { setDailyAverage, currentAverage, ratio, tier } = computeBudgetTier({
+      monthlyBudget: analytics.monthlyBudget,
+      remaining: Math.max(analytics.remainingBudget, 0),
+      daysLeft: analytics.daysLeftInMonth,
+    });
+    const plan = buildTierMealPlan(tier);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        currency: analytics.currency,
+        monthlyBudget: analytics.monthlyBudget,
+        remainingBudget: analytics.remainingBudget,
+        daysLeftInMonth: analytics.daysLeftInMonth,
+        setDailyAverage,
+        currentAverage,
+        ratio,
+        ...plan,
+      },
+    });
+  } catch (error) {
+    console.error('PocketBuddy Meal Plan Tier Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error building meal plan.' });
   }
 };
 

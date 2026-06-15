@@ -7,6 +7,7 @@ const {
   tagTransaction,
   getRecommendation,
   getMealPlan,
+  getMealPlanTier,
 } = require('./pocket.controller');
 
 // GET  /api/v1/pocket/summary        -> balance, budget, runway, category breakdown
@@ -29,5 +30,8 @@ router.get('/recommendation', getRecommendation);
 
 // GET  /api/v1/pocket/meals          -> affordable meal options for remaining budget
 router.get('/meals', getMealPlan);
+
+// GET  /api/v1/pocket/meal-plan-tier -> low/mid/high budget meal plan (set vs current daily avg)
+router.get('/meal-plan-tier', getMealPlanTier);
 
 module.exports = router;
