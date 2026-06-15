@@ -4,7 +4,14 @@ const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
 const User = require('../../sharedModels/User.model');
 const BaselineRoutine = require('../../sharedModels/BaselineRoutine.model');
 const MessMenu = require('../../sharedModels/MessMenu.model');
+const Meetup = require('../../sharedModels/Meetup.model');
 const { findMeetupSlots } = require('../empathyMesh/meetup.service');
+const {
+  slotToDates,
+  slotMatchesMeetup,
+  getActiveMeetupForPair,
+  toMeetupDTO,
+} = require('../empathyMesh/meetupBooking.service');
 
 /** Build a stable, unique-ish nodeId slug from a name. */
 const buildNodeId = (name) => {
@@ -705,10 +712,16 @@ exports.getMeetupSlots = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Pick another member of this community.' });
     }
 
-    const [slots, member] = await Promise.all([
+    const [slots, member, requester, activeMeetup] = await Promise.all([
       findMeetupSlots(userId, memberId),
       User.findOne({ userId: memberId }).select('userId name'),
+      User.findOne({ userId }).select('userId name'),
+      getActiveMeetupForPair(userId, memberId),
     ]);
+
+    const nameOf = new Map(
+      [member, requester].filter(Boolean).map((u) => [u.userId, u.name])
+    );
 
     return res.status(200).json({
       success: true,
@@ -716,11 +729,152 @@ exports.getMeetupSlots = async (req, res) => {
         member: member ? { userId: member.userId, name: member.name } : { userId: memberId, name: memberId },
         slots,
         windowDays: 3,
+        activeMeetup: activeMeetup ? toMeetupDTO(activeMeetup, userId, nameOf) : null,
       },
     });
   } catch (error) {
     console.error('Meet Up Slots Error:', error);
     return res.status(500).json({ success: false, message: 'Server error finding a meet-up slot.' });
+  }
+};
+
+// POST /api/v1/community/nodes/:nodeId/meetup/:memberId/schedule   { slot }
+// Empathy Mesh: book a shared free slot to meet a fellow member. Creates a
+// tentative ('proposed') meetup the other member must accept/reject/reschedule.
+exports.scheduleMeetup = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { nodeId, memberId } = req.params;
+    const { slot } = req.body;
+
+    const node = await CommunityNode.findOne({ nodeId });
+    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
+    if (!node.members.includes(userId)) {
+      return res.status(403).json({ success: false, message: 'Join this community first.' });
+    }
+    if (node.nodeType !== 'Empathy' && node.nature !== 'wellbeing') {
+      return res.status(400).json({ success: false, message: 'Meet Ups are only available in an Empathy Mesh.' });
+    }
+    if (!node.members.includes(memberId) || memberId === userId) {
+      return res.status(400).json({ success: false, message: 'Pick another member of this community.' });
+    }
+
+    const dates = slotToDates(slot);
+    if (!dates) return res.status(400).json({ success: false, message: 'That time slot is invalid.' });
+    if (dates.startAt.getTime() <= Date.now()) {
+      return res.status(400).json({ success: false, message: 'That time slot has already passed.' });
+    }
+
+    // The slot must still be genuinely free for BOTH members.
+    const freeSlots = await findMeetupSlots(userId, memberId);
+    if (!freeSlots.some((s) => slotMatchesMeetup(s, { slot }))) {
+      return res.status(409).json({ success: false, message: 'That slot is no longer free for both of you. Pick another.' });
+    }
+
+    // One active meetup per pair.
+    const existing = await getActiveMeetupForPair(userId, memberId);
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'You already have a Meet Up in progress with this member.' });
+    }
+
+    const meetup = await Meetup.create({
+      nodeId,
+      initiatorId: userId,
+      targetId: memberId,
+      proposedById: userId,
+      pendingForId: memberId,
+      slot,
+      startAt: dates.startAt,
+      endAt: dates.endAt,
+      status: 'proposed',
+    });
+
+    const users = await User.find({ userId: { $in: [userId, memberId] } }).select('userId name');
+    const nameOf = new Map(users.map((u) => [u.userId, u.name]));
+    return res.status(201).json({ success: true, message: 'Meet Up proposed.', data: toMeetupDTO(meetup, userId, nameOf) });
+  } catch (error) {
+    console.error('Schedule Meetup Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error scheduling the meet up.' });
+  }
+};
+
+// POST /api/v1/community/meetup/:meetupId/respond   { action: accept|reject|reschedule, slot? }
+// Only the member the meetup is pending on may respond. Reschedule re-proposes a
+// new slot and flips whose turn it is (symmetric back-and-forth).
+exports.respondMeetup = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { action } = req.body;
+
+    const meetup = await Meetup.findById(req.params.meetupId);
+    if (!meetup) return res.status(404).json({ success: false, message: 'Meet Up not found.' });
+    if (meetup.status !== 'proposed') {
+      return res.status(409).json({ success: false, message: 'This Meet Up can no longer be changed.' });
+    }
+    if (meetup.pendingForId !== userId) {
+      return res.status(403).json({ success: false, message: 'It is not your turn to respond to this Meet Up.' });
+    }
+
+    if (action === 'accept') {
+      meetup.status = 'accepted';
+      meetup.pendingForId = null;
+    } else if (action === 'reject') {
+      meetup.status = 'rejected';
+      meetup.pendingForId = null;
+    } else if (action === 'reschedule') {
+      const dates = slotToDates(req.body.slot);
+      if (!dates) return res.status(400).json({ success: false, message: 'That time slot is invalid.' });
+      if (dates.startAt.getTime() <= Date.now()) {
+        return res.status(400).json({ success: false, message: 'That time slot has already passed.' });
+      }
+      const otherId = meetup.initiatorId === userId ? meetup.targetId : meetup.initiatorId;
+      const freeSlots = await findMeetupSlots(userId, otherId);
+      if (!freeSlots.some((s) => slotMatchesMeetup(s, { slot: req.body.slot }))) {
+        return res.status(409).json({ success: false, message: 'That slot is no longer free for both of you. Pick another.' });
+      }
+      meetup.slot = req.body.slot;
+      meetup.startAt = dates.startAt;
+      meetup.endAt = dates.endAt;
+      meetup.proposedById = userId;
+      meetup.pendingForId = otherId; // flip: the other side must now respond
+    } else {
+      return res.status(400).json({ success: false, message: 'Unknown action.' });
+    }
+    await meetup.save();
+
+    const users = await User.find({ userId: { $in: [meetup.initiatorId, meetup.targetId] } }).select('userId name');
+    const nameOf = new Map(users.map((u) => [u.userId, u.name]));
+    return res.status(200).json({ success: true, data: toMeetupDTO(meetup, userId, nameOf) });
+  } catch (error) {
+    console.error('Respond Meetup Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error responding to the meet up.' });
+  }
+};
+
+// POST /api/v1/community/meetup/:meetupId/cancel
+// Either participant can cancel a still-open (proposed/accepted) meetup.
+exports.cancelMeetup = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const meetup = await Meetup.findById(req.params.meetupId);
+    if (!meetup) return res.status(404).json({ success: false, message: 'Meet Up not found.' });
+    if (![meetup.initiatorId, meetup.targetId].includes(userId)) {
+      return res.status(403).json({ success: false, message: 'Only a participant can cancel this Meet Up.' });
+    }
+    if (!['proposed', 'accepted'].includes(meetup.status)) {
+      return res.status(409).json({ success: false, message: 'This Meet Up is already closed.' });
+    }
+    meetup.status = 'cancelled';
+    meetup.pendingForId = null;
+    await meetup.save();
+    return res.status(200).json({
+      success: true,
+      message: 'Meet Up cancelled.',
+      data: { meetupId: meetup._id.toString(), status: 'cancelled' },
+    });
+  } catch (error) {
+    console.error('Cancel Meetup Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error cancelling the meet up.' });
   }
 };
 
