@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'campusflow_dev_secret_change_me';
+const JWT_SECRET = process.env.JWT_SECRET || 'vidyarthicompanion_dev_secret_change_me';
 
 /**
  * Signs a short-lived access token for a user.

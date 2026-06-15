@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { askCampusFlow } = require('./retrieval.controller');
+const { askVidyarthiCompanion } = require('./retrieval.controller');
 
 // POST /api/v1/retrieval/ask
-router.post('/ask', askCampusFlow);
+router.post('/ask', askVidyarthiCompanion);
 
 module.exports = router;

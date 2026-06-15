@@ -6,7 +6,7 @@ const { calculateBurnoutScore } = require('../empathyMesh/safeSkip.service');
 const { calculateAffordableMeals, daysRemainingInMonth } = require('../pocketBuddy/meal.service');
 const { getUserNodeIds } = require('../communityEngine/node.controller');
 
-exports.askCampusFlow = async (req, res) => {
+exports.askVidyarthiCompanion = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { query } = req.body;
@@ -66,7 +66,7 @@ exports.askCampusFlow = async (req, res) => {
     };
 
     // --- Build the grounded prompt ---
-    const systemPrompt = `You are CampusFlow, an intelligent, helpful college life + finance assistant for a student in India.
+    const systemPrompt = `You are VidyarthiCompanion, an intelligent, helpful college life + finance assistant for a student in India.
 The student asked: "${query}"
 
 Here is their LIVE context as JSON (use ONLY this; do not invent facts):
@@ -102,6 +102,6 @@ RULES:
     res.status(200).json({ success: true, data: { answer } });
   } catch (error) {
     console.error('Retrieval Engine Error:', error);
-    res.status(500).json({ success: false, message: 'Server error querying CampusFlow AI' });
+    res.status(500).json({ success: false, message: 'Server error querying VidyarthiCompanion AI' });
   }
 };

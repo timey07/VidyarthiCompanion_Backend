@@ -1,5 +1,5 @@
 /**
- * Seeds a few demo users for CampusFlow (India-centric, INR).
+ * Seeds a few demo users for VidyarthiCompanion (India-centric, INR).
  *
  * Usage:  node src/seedUsers.js
  * Requires MONGO_URI in the environment (.env).
@@ -15,7 +15,7 @@ const DEMO_USERS = [
   {
     userId: 'cr_aarav',
     name: 'Aarav Sharma',
-    email: 'cr@campusflow.in',
+    email: 'cr@vidyarthicompanion.in',
     password: 'password123',
     role: 'cr',
     trustScore: 3.0,
@@ -24,7 +24,7 @@ const DEMO_USERS = [
   {
     userId: 'student_isha',
     name: 'Isha Patel',
-    email: 'isha@campusflow.in',
+    email: 'isha@vidyarthicompanion.in',
     password: 'password123',
     role: 'student',
     trustScore: 1.0,
@@ -33,7 +33,7 @@ const DEMO_USERS = [
   {
     userId: 'student_rohan',
     name: 'Rohan Mehta',
-    email: 'rohan@campusflow.in',
+    email: 'rohan@vidyarthicompanion.in',
     password: 'password123',
     role: 'student',
     trustScore: 1.0,

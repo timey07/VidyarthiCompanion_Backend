@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 /**
- * User is the identity + profile hub for CampusFlow.
+ * User is the identity + profile hub for VidyarthiCompanion.
  *
  * Scalability note: every telemetry/event collection (AcademicEvent, LifestyleLog,
  * AttendanceRecord, ConsensusVote, ...) keys off a STRING `userId`. We keep that
