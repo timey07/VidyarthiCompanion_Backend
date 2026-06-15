@@ -312,13 +312,13 @@ const personalMenuToObject = (map) => {
 };
 
 /**
- * On joining a Class (Academic) or Mess community, OVERRIDE the member's
- * personal timetable / menu with the community's baseline and return an
- * "adoption" descriptor so the client can showcase what was applied (and offer
- * an undo back to the previous version). Returns null when the community has no
- * baseline to adopt.
+ * Compute what WOULD be adopted if the member synced their personal timetable /
+ * menu with a Class (Academic) or Mess community — WITHOUT writing anything.
+ * Returns a descriptor (with a `changed` flag indicating a mismatch) so the
+ * client can ASK the user before overriding their profile. Returns null when
+ * the community has no baseline to adopt.
  */
-const applyJoinAdoption = async (node, userId) => {
+const computeAdoptable = async (node, userId) => {
   if (node.nodeType === 'Academic') {
     const communitySchedule = cleanSchedule(node.baselineSchedule || []);
     if (!communitySchedule.length) return null;
@@ -328,13 +328,6 @@ const applyJoinAdoption = async (node, userId) => {
     const changed =
       JSON.stringify(normalizeSchedule(communitySchedule)) !==
       JSON.stringify(normalizeSchedule(previousSchedule));
-
-    // Override the personal timetable with the community's version.
-    await BaselineRoutine.findOneAndUpdate(
-      { userId },
-      { $set: { slots: communitySchedule, source: 'community_sync' } },
-      { new: true, upsert: true }
-    );
 
     return {
       kind: 'class',
@@ -357,10 +350,6 @@ const applyJoinAdoption = async (node, userId) => {
     const changed =
       JSON.stringify(normalizeMenu(communityMenu)) !== JSON.stringify(normalizeMenu(previousMenu || {}));
 
-    // Override the personal menu with the community's version.
-    user.personalMessMenu = communityMenu;
-    await user.save();
-
     return {
       kind: 'mess',
       nodeId: node.nodeId,
@@ -369,6 +358,44 @@ const applyJoinAdoption = async (node, userId) => {
       communityMenu,
       previousMenu,
     };
+  }
+
+  return null;
+};
+
+/**
+ * Actually OVERRIDE the member's personal timetable / menu with the community's
+ * baseline. Returns the adopted descriptor, or null when there is nothing to
+ * adopt. This is only ever invoked when the user explicitly opts in.
+ */
+const applyAdoption = async (node, userId) => {
+  if (node.nodeType === 'Academic') {
+    const communitySchedule = cleanSchedule(node.baselineSchedule || []);
+    if (!communitySchedule.length) return null;
+
+    // Override the personal timetable with the community's version.
+    await BaselineRoutine.findOneAndUpdate(
+      { userId },
+      { $set: { slots: communitySchedule, source: 'community_sync' } },
+      { new: true, upsert: true }
+    );
+
+    return { kind: 'class', nodeId: node.nodeId, nodeName: node.name, communitySchedule };
+  }
+
+  if (node.nodeType === 'Mess') {
+    const menuDoc = await MessMenu.findOne({ nodeId: node.nodeId });
+    const communityMenu = menuDocToObject(menuDoc);
+    if (!communityMenu) return null;
+
+    const user = await User.findOne({ userId });
+    if (!user) return null;
+
+    // Override the personal menu with the community's version.
+    user.personalMessMenu = communityMenu;
+    await user.save();
+
+    return { kind: 'mess', nodeId: node.nodeId, nodeName: node.name, communityMenu };
   }
 
   return null;
@@ -390,11 +417,12 @@ exports.joinByCode = async (req, res) => {
     await CommunityNode.updateOne({ nodeId: node.nodeId }, { $addToSet: { members: userId } });
     await syncUserNodes(userId);
 
-    // Class/Mess: adopt (override personal with) the community baseline on a
-    // fresh join, and tell the client so it can showcase the adopted version.
-    let adopted = null;
+    // Class/Mess: do NOT auto-override. Instead compute what COULD be adopted so
+    // the client can ask the user whether to replace their personal timetable /
+    // menu with the community's. Adoption itself happens via /adopt-baseline.
+    let adoptable = null;
     if (!wasMember) {
-      adopted = await applyJoinAdoption(node, userId);
+      adoptable = await computeAdoptable(node, userId);
     }
 
     return res.status(200).json({
@@ -402,11 +430,67 @@ exports.joinByCode = async (req, res) => {
       status: 'joined',
       message: `Joined ${node.name}.`,
       data: toNodeDTO(node, userId),
-      adopted,
+      adoptable,
     });
   } catch (error) {
     console.error('Join By Code Error:', error);
     return res.status(500).json({ success: false, message: 'Server error joining community.' });
+  }
+};
+
+// GET /api/v1/community/nodes/:nodeId/baseline
+// Member-only: view the community's current official timetable (Academic) or
+// menu (Mess). Powers the "Community menu / timetable" view in the community
+// section and the preview shown in the Profile when picking a primary community.
+exports.getNodeBaseline = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
+    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
+    if (!node.members.includes(userId)) {
+      return res.status(403).json({ success: false, message: 'Join this community to view its menu/timetable.' });
+    }
+
+    if (node.nodeType === 'Mess') {
+      const menuDoc = await MessMenu.findOne({ nodeId: node.nodeId });
+      return res.status(200).json({
+        success: true,
+        data: { kind: 'mess', nodeId: node.nodeId, nodeName: node.name, menu: menuDocToObject(menuDoc) || {}, schedule: [] },
+      });
+    }
+
+    const kind = node.nodeType === 'Academic' ? 'class' : 'other';
+    return res.status(200).json({
+      success: true,
+      data: { kind, nodeId: node.nodeId, nodeName: node.name, schedule: cleanSchedule(node.baselineSchedule || []), menu: null },
+    });
+  } catch (error) {
+    console.error('Get Node Baseline Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error loading community baseline.' });
+  }
+};
+
+// POST /api/v1/community/nodes/:nodeId/adopt-baseline
+// Member-only: copy the community's official timetable (Academic) or menu (Mess)
+// into the member's personal profile, replacing their previous version. This is
+// the explicit opt-in behind the "use community's timetable/menu" choice.
+exports.adoptNodeBaseline = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const node = await CommunityNode.findOne({ nodeId: req.params.nodeId });
+    if (!node) return res.status(404).json({ success: false, message: 'Community not found.' });
+    if (!node.members.includes(userId)) {
+      return res.status(403).json({ success: false, message: 'Join this community first.' });
+    }
+
+    const adopted = await applyAdoption(node, userId);
+    if (!adopted) {
+      return res.status(400).json({ success: false, message: 'This community has no menu/timetable to adopt yet.' });
+    }
+    return res.status(200).json({ success: true, message: 'Adopted into your profile.', data: adopted });
+  } catch (error) {
+    console.error('Adopt Node Baseline Error:', error);
+    return res.status(500).json({ success: false, message: 'Server error adopting community baseline.' });
   }
 };
 

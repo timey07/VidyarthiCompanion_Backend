@@ -78,6 +78,9 @@ const userSchema = new mongoose.Schema(
     // The user's chosen primary Class (Academic) community — the baseline
     // timetable source, mirrored to the Master Calendar.
     primaryClassNodeId: { type: String, default: null },
+    // The user's chosen primary Empathy Mesh (wellbeing) community — the circle
+    // that receives wellbeing nudges and powers the "Meet Up" free-slot finder.
+    primaryEmpathyNodeId: { type: String, default: null },
     // Personal mess menu (day -> meals) the user maintains independently of any
     // Mess community. Used when the student is not in a Mess group, or wants to
     // keep their own menu after a Sync / Keep-Own conflict resolution.
@@ -123,6 +126,8 @@ userSchema.methods.toPublicJSON = function () {
     financialConfig: this.financialConfig,
     primaryMessNodeId: this.primaryMessNodeId,
     primaryGymNodeId: this.primaryGymNodeId,
+    primaryClassNodeId: this.primaryClassNodeId,
+    primaryEmpathyNodeId: this.primaryEmpathyNodeId,
     wellnessThresholds: this.wellnessThresholds,
     neurodivergentTags: this.neurodivergentTags,
   };

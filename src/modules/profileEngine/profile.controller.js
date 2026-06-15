@@ -50,10 +50,11 @@ exports.getProfile = async (req, res) => {
     const user = await User.findOne({ userId });
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    const [messCommunities, gymCommunities, classCommunities, routine] = await Promise.all([
+    const [messCommunities, gymCommunities, classCommunities, empathyCommunities, routine] = await Promise.all([
       listUserNodesByType(userId, 'Mess'),
       listUserNodesByType(userId, 'Gym'),
       listUserNodesByType(userId, 'Academic'),
+      listUserNodesByType(userId, 'Empathy'),
       BaselineRoutine.findOne({ userId }),
     ]);
 
@@ -76,9 +77,11 @@ exports.getProfile = async (req, res) => {
         primaryMessNodeId: user.primaryMessNodeId || null,
         primaryGymNodeId: user.primaryGymNodeId || null,
         primaryClassNodeId: user.primaryClassNodeId || null,
+        primaryEmpathyNodeId: user.primaryEmpathyNodeId || null,
         messCommunities,
         gymCommunities,
         classCommunities,
+        empathyCommunities,
         schedule: routine ? routine.slots : [],
         menu: menuToObject(menuDoc),
         personalMenu: messMapToObject(user.personalMessMenu),
@@ -98,7 +101,7 @@ exports.updateFinancial = async (req, res) => {
     const user = await User.findOne({ userId });
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    const { monthlyBudget, safeBufferPct, primaryMessNodeId, primaryGymNodeId, primaryClassNodeId } = req.body;
+    const { monthlyBudget, safeBufferPct, primaryMessNodeId, primaryGymNodeId, primaryClassNodeId, primaryEmpathyNodeId } = req.body;
 
     if (monthlyBudget != null) {
       const v = Number(monthlyBudget);
@@ -133,6 +136,12 @@ exports.updateFinancial = async (req, res) => {
       }
       user.primaryClassNodeId = primaryClassNodeId || null;
     }
+    if (primaryEmpathyNodeId !== undefined) {
+      if (primaryEmpathyNodeId && !user.communityNodeIds.includes(primaryEmpathyNodeId)) {
+        return res.status(400).json({ success: false, message: 'Join that Empathy Mesh first.' });
+      }
+      user.primaryEmpathyNodeId = primaryEmpathyNodeId || null;
+    }
 
     await user.save();
     return res.status(200).json({
@@ -144,6 +153,7 @@ exports.updateFinancial = async (req, res) => {
         primaryMessNodeId: user.primaryMessNodeId,
         primaryGymNodeId: user.primaryGymNodeId,
         primaryClassNodeId: user.primaryClassNodeId,
+        primaryEmpathyNodeId: user.primaryEmpathyNodeId,
       },
     });
   } catch (error) {

@@ -13,6 +13,8 @@ const {
   listNodeMembers,
   getNodeFeed,
   updateBaseline,
+  getNodeBaseline,
+  adoptNodeBaseline,
 } = require('./node.controller');
 const { getMessVotes, castMessVote } = require('./messVote.controller');
 
@@ -37,6 +39,11 @@ router.get('/nodes/:nodeId/feed', getNodeFeed);
 
 // Admin-only: update the community's baseline timetable (Academic) or menu (Mess).
 router.put('/nodes/:nodeId/baseline', updateBaseline);
+
+// Member-only: view a community's official timetable/menu, and adopt it into
+// the member's personal profile (replacing their previous version).
+router.get('/nodes/:nodeId/baseline', getNodeBaseline);
+router.post('/nodes/:nodeId/adopt-baseline', adoptNodeBaseline);
 
 // Mess community per-meal voting (Eatable / Leave), time-gated to the current meal.
 router.get('/nodes/:nodeId/mess-vote', getMessVotes);
