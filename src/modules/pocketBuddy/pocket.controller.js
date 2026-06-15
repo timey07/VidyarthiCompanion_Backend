@@ -5,6 +5,8 @@ const CommunityNode = require('../../sharedModels/CommunityNode.model');
 const AcademicEvent = require('../../sharedModels/AcademicEvent.model');
 const ConsensusVote = require('../../sharedModels/ConsensusVote.model');
 const MessMenu = require('../../sharedModels/MessMenu.model');
+const MessMealVote = require('../../sharedModels/MessMealVote.model');
+const { _helpers: messVoteHelpers } = require('../communityEngine/messVote.controller');
 const { calculateAffordableMeals, daysRemainingInMonth, DEFAULT_NEARBY_OPTIONS } = require('./meal.service');
 const { normalizeMerchantId, prettyName, inferCategory } = require('./merchant.service');
 const gemini = require('../../core/gemini.service');
@@ -395,8 +397,38 @@ const getTodaysDish = async (nodeId) => {
 };
 
 /**
- * Judge Mess food quality from the consensus on recent updates in the user's
- * (preferred) Mess community. Net vote score > 0 = good, < 0 = poor.
+ * Today's per-meal vote verdict for a Mess node (Module 2). Looks at the
+ * current time-gated meal slot first; if it has no votes yet, falls back to the
+ * most recently voted slot today. A "leave" majority => poor (eat outside).
+ */
+const assessMessMealVotes = async (nodeId) => {
+  if (!nodeId) return { hasVotes: false };
+  const dateKey = messVoteHelpers.todayKey();
+  const tallies = await messVoteHelpers.tallyToday(nodeId, dateKey);
+  const currentSlot = messVoteHelpers.currentVotableSlot();
+
+  // Prefer the current meal; otherwise the latest meal that has any votes today.
+  const order = ['dinner', 'lunch', 'breakfast'];
+  let slot = tallies[currentSlot]?.total > 0 ? currentSlot : null;
+  if (!slot) slot = order.find((s) => tallies[s]?.total > 0) || null;
+  if (!slot) return { hasVotes: false };
+
+  const t = tallies[slot];
+  const quality = t.net > 0 ? 'good' : t.net < 0 ? 'poor' : 'unknown';
+  return {
+    hasVotes: true,
+    quality,
+    netVotes: t.net,
+    eatable: t.eatable,
+    leave: t.leave,
+    slot,
+  };
+};
+
+/**
+ * Judge Mess food quality. Prefers today's per-meal community votes (Eatable /
+ * Leave); falls back to consensus on recent Mess updates when no meal votes
+ * exist yet. Net vote score > 0 = good, < 0 = poor.
  */
 const assessMessQuality = async (userId, preferredNodeId) => {
   let messNodes = await CommunityNode.find({ members: userId, nodeType: 'Mess' }).select('nodeId name');
@@ -408,6 +440,26 @@ const assessMessQuality = async (userId, preferredNodeId) => {
     return { quality: 'unknown', netVotes: 0, echoes: 0, flags: 0, nodeCount: 0, sample: null, nodeId: null, nodeName: null };
   }
 
+  const primary = messNodes[0];
+
+  // 1) Per-meal community votes take priority (the explicit Eatable/Leave signal).
+  const mealVerdict = await assessMessMealVotes(primary.nodeId);
+  if (mealVerdict.hasVotes) {
+    return {
+      quality: mealVerdict.quality,
+      netVotes: mealVerdict.netVotes,
+      echoes: mealVerdict.eatable,
+      flags: mealVerdict.leave,
+      nodeCount: messNodes.length,
+      sample: null,
+      source: 'meal_votes',
+      votedSlot: mealVerdict.slot,
+      nodeId: primary.nodeId,
+      nodeName: primary.name,
+    };
+  }
+
+  // 2) Fall back to consensus on recent Mess updates.
   const since = new Date();
   since.setHours(since.getHours() - 36);
   const nodeIds = messNodes.map((n) => n.nodeId);

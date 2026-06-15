@@ -75,6 +75,9 @@ const userSchema = new mongoose.Schema(
     primaryMessNodeId: { type: String, default: null },
     // The user's chosen primary Gym community (for fuel/protein nudges).
     primaryGymNodeId: { type: String, default: null },
+    // The user's chosen primary Class (Academic) community — the baseline
+    // timetable source, mirrored to the Master Calendar.
+    primaryClassNodeId: { type: String, default: null },
     // Personal mess menu (day -> meals) the user maintains independently of any
     // Mess community. Used when the student is not in a Mess group, or wants to
     // keep their own menu after a Sync / Keep-Own conflict resolution.
