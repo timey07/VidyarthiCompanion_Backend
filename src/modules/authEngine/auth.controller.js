@@ -27,7 +27,7 @@ const normalizeUsername = (username) =>
 // POST /api/v1/auth/register
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, role, username } = req.body;
+    const { name, email, password, username } = req.body;
 
     if (!name || !email || !password) {
       return res
@@ -54,18 +54,16 @@ exports.register = async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Only allow 'student' or 'cr' on self-signup; 'admin' is provisioned internally.
-    const safeRole = ['student', 'cr'].includes(role) ? role : 'student';
-
+    // Self-signup always creates a student. There is no CR concept; 'admin' is
+    // provisioned internally, never through this endpoint.
     const user = await User.create({
       userId: buildUserId(handle),
       name: name.trim(),
       username: handle,
       email: normalizedEmail,
       passwordHash,
-      role: safeRole,
-      // CRs carry more consensus weight out of the box.
-      trustScore: safeRole === 'cr' ? 3.0 : 1.0,
+      role: 'student',
+      trustScore: 1.0,
     });
 
     const token = signToken(user);
