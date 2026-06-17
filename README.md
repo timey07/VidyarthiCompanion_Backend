@@ -315,7 +315,7 @@ node test-bedrock.js
 
 <div align="center">
 
-**Part of the [VidyarthiCompanion](../README.md) Campus OS**
+**Part of the VidyarthiCompanion Campus OS**
 
 *Built by Team QuantYap for HackOn with Amazon 2026*
 
