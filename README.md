@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # ⚙️ VidyarthiCompanion — Backend
 
@@ -320,4 +320,3 @@ node test-bedrock.js
 *Built by Team QuantYap for HackOn with Amazon 2026*
 
 </div>
-]]>
